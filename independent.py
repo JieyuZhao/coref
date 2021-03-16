@@ -2,13 +2,18 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
+import os,sys
 import random
 import math
 import json
 import threading
 import numpy as np
 import tensorflow as tf
+from copy import deepcopy
+from operator import itemgetter
+import heapq
+import minimize
+import collections
 
 import util
 import coref_ops
@@ -44,14 +49,18 @@ class CorefModel(object):
     input_props.append((tf.int32, [None])) # Gold ends.
     input_props.append((tf.int32, [None])) # Cluster ids.
     input_props.append((tf.int32, [None])) # Sentence Map
-
+    input_props.append((tf.int32, [None, None])) # trigger_ids 
     self.queue_input_tensors = [tf.placeholder(dtype, shape) for dtype, shape in input_props]
     dtypes, shapes = zip(*input_props)
     queue = tf.PaddingFIFOQueue(capacity=10, dtypes=dtypes, shapes=shapes)
     self.enqueue_op = queue.enqueue(self.queue_input_tensors)
     self.input_tensors = queue.dequeue()
-
-    self.predictions, self.loss = self.get_predictions_and_loss(*self.input_tensors)
+    self.trigger_token_ids = tf.placeholder(tf.int32, [None, None])
+    self.input_tensors[-1] = self.trigger_token_ids
+    
+    self.vocab = self.tokenizer.inv_vocab
+    # self.update_input_tensors()
+    self.predictions, self.loss, self.word_embeddings, self.instance_tensors = self.get_predictions_and_loss(*self.input_tensors)
     # bert stuff
     tvars = tf.trainable_variables()
     # If you're using TF weights only, tf_checkpoint and init_checkpoint can be the same
@@ -59,6 +68,8 @@ class CorefModel(object):
     assignment_map, initialized_variable_names = modeling.get_assignment_map_from_checkpoint(tvars, config['tf_checkpoint'])
     init_from_checkpoint = tf.train.init_from_checkpoint if config['init_checkpoint'].endswith('ckpt') else load_from_pytorch_checkpoint
     init_from_checkpoint(config['init_checkpoint'], assignment_map)
+    gvar = []
+
     print("**** Trainable Variables ****")
     for var in tvars:
       init_string = ""
@@ -67,7 +78,9 @@ class CorefModel(object):
       # tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                       # init_string)
       print("  name = %s, shape = %s%s" % (var.name, var.shape, init_string))
-
+      if var.name == 'bert/embeddings/word_embeddings:0':
+        gvar.append(var)
+  
     num_train_steps = int(
                     self.config['num_docs'] * self.config['num_epochs'])
     num_warmup_steps = int(num_train_steps * 0.1)
@@ -76,17 +89,44 @@ class CorefModel(object):
                       self.loss, self.config['bert_learning_rate'], self.config['task_learning_rate'],
                       num_train_steps, num_warmup_steps, False, self.global_step, freeze=-1,
                       task_opt=self.config['task_optimizer'], eps=config['adam_eps'])
+    self.batch_grad = tf.gradients(self.loss, gvar)
+    # self.get_trigger_token_ids(session, self.instance_tensors)
+
+  def get_trigger_token_ids(self, session, instance_tensors):
+    trigger_ids = instance_tensors[-1]
+    cand_trigger_token_ids = session.run(self.hotflip_attack(self.batch_grad[0].values[1:4],
+                                                        self.word_embeddings,
+                                                        trigger_ids,
+                                                       num_candidates=40))
+    new_trigger_token_ids = session.run(self.get_best_candidates(session,
+                                                    instance_tensors,
+                                                      trigger_ids,
+                                                      cand_trigger_token_ids,
+                                                    ))
+    # self.update_input_tensors()
+    return new_trigger_token_ids
+    # trigger_ids
+
+  def update_input_tensors(self):
+    self.input_tensors[-1] = self.trigger_token_ids
+    
 
   def start_enqueue_thread(self, session):
     with open(self.config["train_path"]) as f:
       train_examples = [json.loads(jsonline) for jsonline in f.readlines()]
+      print(f"in total, {len(train_examples)} training examples")
     def _enqueue_loop():
+      count = 0
       while True:
-        random.shuffle(train_examples)
+        # random.shuffle(train_examples)
         if self.config['single_example']:
           for example in train_examples:
             tensorized_example = self.tensorize_example(example, is_training=True)
+            # if count < 4:
+            #   print("tensorized_example:", tensorized_example)
+            count += 1
             feed_dict = dict(zip(self.queue_input_tensors, tensorized_example))
+            session.run(self.enqueue_op, feed_dict=feed_dict)
             session.run(self.enqueue_op, feed_dict=feed_dict)
         else:
           examples = []
@@ -136,7 +176,7 @@ class CorefModel(object):
     return speaker_dict
 
 
-  def tensorize_example(self, example, is_training):
+  def tensorize_example(self, example, is_training, trigger_token_ids=None):
     clusters = example["clusters"]
 
     gold_mentions = sorted(tuple(m) for m in util.flatten(clusters))
@@ -181,7 +221,7 @@ class CorefModel(object):
     genre = self.genres.get(doc_key[:2], 0)
 
     gold_starts, gold_ends = self.tensorize_mentions(gold_mentions)
-    example_tensors = (input_ids, input_mask,  text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map)
+    example_tensors = (input_ids, input_mask,  text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, input_ids[:, 1:4])
 
     if is_training and len(sentences) > self.config["max_training_sentences"]:
       if self.config['single_example']:
@@ -246,7 +286,10 @@ class CorefModel(object):
     return top_antecedents, top_antecedents_mask, top_fast_antecedent_scores, top_antecedent_offsets
 
 
-  def get_predictions_and_loss(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map):
+  def get_predictions_and_loss(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids):
+
+    
+    
     model = modeling.BertModel(
       config=self.bert_config,
       is_training=is_training,
@@ -254,8 +297,13 @@ class CorefModel(object):
       input_mask=input_mask,
       use_one_hot_embeddings=False,
       scope='bert')
+    
+    params = [input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids] 
+
     all_encoder_layers = model.get_all_encoder_layers()
     mention_doc = model.get_sequence_output()
+    word_embeddings = model.get_embedding_table()
+
 
     self.dropout = self.get_dropout(self.config["dropout_rate"], is_training)
 
@@ -296,7 +344,7 @@ class CorefModel(object):
     top_span_indices.set_shape([1, None])
     top_span_indices = tf.squeeze(top_span_indices, 0) # [k]
 
-    top_span_starts = tf.gather(candidate_starts, top_span_indices) # [k]
+    top_span_starts = tf.gather(candidate_starts, top_span_indices) # [k]u8
     top_span_ends = tf.gather(candidate_ends, top_span_indices) # [k]
     top_span_emb = tf.gather(candidate_span_emb, top_span_indices) # [k, emb]
     top_span_cluster_ids = tf.gather(candidate_cluster_ids, top_span_indices) # [k]
@@ -328,6 +376,7 @@ class CorefModel(object):
           with tf.variable_scope("f"):
             f = tf.sigmoid(util.projection(tf.concat([top_span_emb, attended_span_emb], 1), util.shape(top_span_emb, -1))) # [k, emb]
             top_span_emb = f * attended_span_emb + (1 - f) * top_span_emb # [k, emb]
+      
     else:
         top_antecedent_scores = top_fast_antecedent_scores
 
@@ -343,7 +392,8 @@ class CorefModel(object):
     loss = self.softmax_loss(top_antecedent_scores, top_antecedent_labels) # [k]
     loss = tf.reduce_sum(loss) # []
 
-    return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores], loss
+    return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores], loss, \
+      word_embeddings, params 
 
 
   def get_span_emb(self, head_emb, context_outputs, span_starts, span_ends):
@@ -524,18 +574,30 @@ class CorefModel(object):
     evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
     return predicted_clusters
 
-  def load_eval_data(self):
+  def load_eval_data(self, trigger_token_ids):
+    tokens = [self.vocab[x] for x in trigger_token_ids[0]]
+    print("---For evaluating, the trigger tokens are:", trigger_token_ids, tokens)
     if self.eval_data is None:
       def load_line(line):
-        example = json.loads(line)
+        # example = json.loads(line)
+        example = line
         return self.tensorize_example(example, is_training=False), example
-      with open(self.config["eval_path"]) as f:
-        self.eval_data = [load_line(l) for l in f.readlines()]
+      # with open(self.config["eval_path"]) as f:
+      #   self.eval_data = [load_line(l) for l in f.readlines()]
+      labels = collections.defaultdict(set)
+      stats = collections.defaultdict(int)
+      documents = minimize.minimize_language("test_type1_anti_stereotype", "english", "v4_auto_conll", \
+        labels = labels,\
+          stats = stats, \
+        vocab_file='cased_config_vocab/vocab.txt', seg_len = 384, input_dir='./data', \
+          output_dir="./data", do_lower_case=False, triggers=tokens)
+      self.eval_data = [load_line(l) for l in documents]
       num_words = sum(tensorized_example[2].sum() for tensorized_example, _ in self.eval_data)
       print("Loaded {} eval examples.".format(len(self.eval_data)))
+      print("eval data instances:", documents[:2])
 
-  def evaluate(self, session, global_step=None, official_stdout=False, keys=None, eval_mode=False):
-    self.load_eval_data()
+  def evaluate(self, session, global_step=None, official_stdout=False, keys=None, eval_mode=False, trigger_token_ids=None):
+    self.load_eval_data(trigger_token_ids)
 
     coref_predictions = {}
     coref_evaluator = metrics.CorefEvaluator()
@@ -544,7 +606,7 @@ class CorefModel(object):
     num_evaluated= 0
 
     for example_num, (tensorized_example, example) in enumerate(self.eval_data):
-      _, _, _, _, _, _, gold_starts, gold_ends, _, _ = tensorized_example
+      _, _, _, _, _, _, gold_starts, gold_ends, _, _,_ = tensorized_example
       feed_dict = {i:t for i,t in zip(self.input_tensors, tensorized_example)}
       # if tensorized_example[0].shape[0] <= 9:
       if keys is not None and example['doc_key'] not in keys:
@@ -575,3 +637,86 @@ class CorefModel(object):
     print("Average recall (py): {:.2f}%".format(r * 100))
 
     return util.make_summary(summary_dict), f
+
+  def hotflip_attack(self, averaged_grad, embedding_matrix, trigger_token_ids,
+                   increase_loss=False, num_candidates=1):
+    """
+    The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
+    the nice code of Paul Michel here https://github.com/pmichel31415/translate/blob/paul/
+    pytorch_translate/research/adversarial/adversaries/brute_force_adversary.py
+
+    This function takes in the model's average_grad over a batch of examples, the model's
+    token embedding matrix, and the current trigger token IDs. It returns the top token
+    candidates for each position.
+
+    If increase_loss=True, then the attack reverses the sign of the gradient and tries to increase
+    the loss (decrease the model's probability of the true class). For targeted attacks, you want
+    to decrease the loss of the target class (increase_loss=False).
+    """
+  
+    averaged_grad = tf.expand_dims(averaged_grad,0)
+    gradient_dot_embedding_matrix = tf.einsum("bij,kj->bik", averaged_grad, embedding_matrix )     
+    if not increase_loss:
+        gradient_dot_embedding_matrix *= -1    # lower versus increase the class probability.
+    if num_candidates > 1: # get top k options
+        _, best_k_ids = tf.math.top_k(gradient_dot_embedding_matrix, num_candidates)
+        return best_k_ids[0]
+    _, best_at_each_step = gradient_dot_embedding_matrix.max(2)
+    return best_at_each_step[0]
+
+
+  def get_best_candidates(self, session, input_tensors, trigger_token_ids, cand_trigger_token_ids, beam_size=1):
+      """"
+      Given the list of candidate trigger token ids (of number of trigger words by number of candidates
+      per word), it finds the best new candidate trigger.
+      This performs beam search in a left to right fashion.
+      """
+      # first round, no beams, just get the loss for each of the candidates in index 0.
+      # (indices 1-end are just the old trigger)
+
+      
+      loss_per_candidate = self.get_loss_per_candidate(session, 0,  input_tensors, trigger_token_ids,
+                                                  cand_trigger_token_ids)
+      
+      # minimize the loss
+      top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
+      # print("0 top_candiates:", top_candidates)
+      
+      # top_candidates now contains beam_size trigger sequences, each with a different 0th token
+      for idx in range(1, len(trigger_token_ids[0])): # for all trigger tokens, skipping the 0th (we did it above)
+          loss_per_candidate = []
+          input_tensors[-1] = top_candidates[0][0]
+          input_tensors[0][0][1:4] = top_candidates[0][0]
+          for cand, _ in top_candidates: # for all the beams, try all the candidates at idx
+              loss_per_candidate.extend(self.get_loss_per_candidate(session, idx, input_tensors, cand,
+                                                              cand_trigger_token_ids))
+          top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
+          # print(f"{idx}: top_candiates: {top_candidates}")
+      return tf.convert_to_tensor(min(top_candidates, key=itemgetter(1))[0])
+
+  def get_loss_per_candidate(self, session, index, input_tensors, trigger_token_ids, cand_trigger_token_ids):
+      """
+      For a particular index, the function tries all of the candidate tokens for that index.
+      The function returns a list containing the candidate triggers it tried, along with their loss.
+      """
+      if isinstance(cand_trigger_token_ids[0], (np.int64, int)):
+          print("Only 1 candidate for index detected, not searching")
+          return trigger_token_ids
+      loss_per_candidate = []
+      
+      # print("inside input tensors:", input_tensors)
+      # loss for the trigger without trying the candidates
+      feed_dict = {i:t for i,t in zip(self.input_tensors, input_tensors)}
+      curr_loss = session.run([self.loss], feed_dict=feed_dict)
+      loss_per_candidate.append((deepcopy(trigger_token_ids), curr_loss))
+      for cand_id in range(len(cand_trigger_token_ids[0])):
+          trigger_token_ids_one_replaced = deepcopy(np.array(trigger_token_ids)) # copy trigger
+          trigger_token_ids_one_replaced[0][index] = cand_trigger_token_ids[index][cand_id] # replace one token
+          
+          input_tensors[0][0][1+index] = cand_trigger_token_ids[index][cand_id]  ##deepcopy problem
+          # print("replaced input_tensors:", input_tensors)
+
+          feed_dict = {i:t for i,t in zip(self.input_tensors, input_tensors)}
+          loss = session.run([self.loss], feed_dict=feed_dict)
+          loss_per_candidate.append((deepcopy(trigger_token_ids_one_replaced), loss))
+      return loss_per_candidate

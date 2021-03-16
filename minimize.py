@@ -155,7 +155,7 @@ def get_sentence_map(segments, sentence_end):
     sent_map.append(current)
   return sent_map
 
-def get_document(document_lines, tokenizer, language, segment_len):
+def get_document(document_lines, tokenizer, language, segment_len, stats):
   document_state = DocumentState(document_lines[0])
   word_idx = -1
   for line in document_lines[1]:
@@ -190,8 +190,8 @@ def skip(doc_key):
   return False
 
 def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir):
-  input_path = "{}/{}.{}.{}".format(input_dir, name, language, extension)
-  output_path = "{}/{}.{}.{}.jsonlines".format(output_dir, name, language, seg_len)
+  input_path = "{}/{}.{}".format(input_dir, name, extension)
+  output_path = "{}/{}.{}.jsonlines".format(output_dir, name, seg_len)
   count = 0
   print("Minimizing {}".format(input_path))
   documents = []
@@ -205,6 +205,7 @@ def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_
         continue
       else:
         documents[-1][1].append(line)
+  
   with open(output_path, "w") as output_file:
     for document_lines in documents:
       if skip(document_lines[0]):
@@ -215,13 +216,44 @@ def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_
       count += 1
   print("Wrote {} documents to {}".format(count, output_path))
 
-def minimize_language(language, labels, stats, vocab_file, seg_len, input_dir, output_dir, do_lower_case):
+def minimize_partition_jy(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, trigger_tokens=None):
+  input_path = "{}/{}.{}".format(input_dir, name, extension)
+  output_path = "{}/{}.{}.jsonlines".format(output_dir, name, seg_len)
+  count = 0
+  print("Minimizing {}".format(input_path))
+  documents = []
+  res = []
+  with open(input_path, "r") as input_file:
+    for line in input_file.readlines():
+      begin_document_match = re.match(conll.BEGIN_DOCUMENT_REGEX, line)
+      if begin_document_match:
+        doc_key = conll.get_doc_key(begin_document_match.group(1), begin_document_match.group(2))
+        documents.append((doc_key, []))
+        if trigger_tokens != None:
+          for idx in range(len(trigger_tokens)):
+            documents[-1][1].append('\t'.join([doc_key, "0", str(len(trigger_tokens) - idx), trigger_tokens[idx], '-', '-', '-', '-', '-', 'Speaker#1', '*', '*', '*', '*', '-']))
+      elif line.startswith("#end document"):
+        continue
+      else:
+        documents[-1][1].append(line)
+  
+  for document_lines in documents:
+    if skip(document_lines[0]):
+      continue
+    document = get_document(document_lines, tokenizer, language, seg_len, stats)
+    count += 1
+    res.append(document)
+  print("extracted {} documents".format(count))
+  return res
+
+def minimize_language(filename,language, extension, labels, stats, vocab_file, seg_len, input_dir, output_dir, do_lower_case, triggers):
   # do_lower_case = True if 'chinese' in vocab_file else False
   tokenizer = tokenization.FullTokenizer(
                 vocab_file=vocab_file, do_lower_case=do_lower_case)
-  minimize_partition("dev", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  minimize_partition("train", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_partition("dev", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_partition("train", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  return minimize_partition_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
 
 if __name__ == "__main__":
   vocab_file = sys.argv[1]
