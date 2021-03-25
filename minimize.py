@@ -155,7 +155,7 @@ def get_sentence_map(segments, sentence_end):
     sent_map.append(current)
   return sent_map
 
-def get_document(document_lines, tokenizer, language, segment_len, stats):
+def get_document(document_lines, tokenizer, language, segment_len):
   document_state = DocumentState(document_lines[0])
   word_idx = -1
   for line in document_lines[1]:
@@ -190,8 +190,8 @@ def skip(doc_key):
   return False
 
 def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir):
-  input_path = "{}/{}.{}".format(input_dir, name, extension)
-  output_path = "{}/{}.{}.jsonlines".format(output_dir, name, seg_len)
+  input_path = "{}/{}.{}.{}".format(input_dir, name, language, extension)
+  output_path = "{}/{}.{}.{}.jsonlines".format(output_dir, name, language, seg_len)
   count = 0
   print("Minimizing {}".format(input_path))
   documents = []
@@ -218,40 +218,39 @@ def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_
 
 def minimize_partition_jy(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, trigger_tokens=None):
   input_path = "{}/{}.{}".format(input_dir, name, extension)
-  output_path = "{}/{}.{}.jsonlines".format(output_dir, name, seg_len)
+  # output_path = "{}/{}.{}_triggers.jsonlines".format(output_dir, name, seg_len)
+  output_path = input_path + "_triggers"
   count = 0
-  print("Minimizing {}".format(input_path))
+  print("adding triggered lines to {}".format(input_path))
   documents = []
-  res = []
   with open(input_path, "r") as input_file:
     for line in input_file.readlines():
       begin_document_match = re.match(conll.BEGIN_DOCUMENT_REGEX, line)
       if begin_document_match:
         doc_key = conll.get_doc_key(begin_document_match.group(1), begin_document_match.group(2))
-        documents.append((doc_key, []))
+        documents.append(line)
         if trigger_tokens != None:
           for idx in range(len(trigger_tokens)):
-            documents[-1][1].append('\t'.join([doc_key, "0", str(len(trigger_tokens) - idx), trigger_tokens[idx], '-', '-', '-', '-', '-', 'Speaker#1', '*', '*', '*', '*', '-']))
+            documents.append('\t'.join([doc_key, "0", str(-len(trigger_tokens) + idx), trigger_tokens[idx], '-', '-', '-', '-', '-', 'Speaker#1', '*', '*', '*', '*', '-'])+"\n")
       elif line.startswith("#end document"):
-        continue
+        documents.append(line)
       else:
-        documents[-1][1].append(line)
+        documents.append(line)
+    print("documents:", documents[:5])
   
-  for document_lines in documents:
-    if skip(document_lines[0]):
-      continue
-    document = get_document(document_lines, tokenizer, language, seg_len, stats)
-    count += 1
-    res.append(document)
-  print("extracted {} documents".format(count))
-  return res
+  with open(output_path, "w") as output_file:
+    for document_lines in documents:
+      output_file.write(document_lines)
+      count += 1
+  print("Wrote {} documents to {}".format(count, output_path))
+
 
 def minimize_language(filename,language, extension, labels, stats, vocab_file, seg_len, input_dir, output_dir, do_lower_case, triggers):
   # do_lower_case = True if 'chinese' in vocab_file else False
   tokenizer = tokenization.FullTokenizer(
                 vocab_file=vocab_file, do_lower_case=do_lower_case)
-  # minimize_partition("dev", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  # minimize_partition("train", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_partition("dev.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_partition("train.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
   # minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
   return minimize_partition_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
 
@@ -259,14 +258,17 @@ if __name__ == "__main__":
   vocab_file = sys.argv[1]
   input_dir = sys.argv[2]
   output_dir = sys.argv[3]
+  triggers = ["the", "the", "the"]
   do_lower_case = sys.argv[4].lower() == 'true'
   print(do_lower_case)
   labels = collections.defaultdict(set)
   stats = collections.defaultdict(int)
   if not os.path.isdir(output_dir):
     os.mkdir(output_dir)
-  for seg_len in [128, 256, 384, 512]:
-    minimize_language("english", labels, stats, vocab_file, seg_len, input_dir, output_dir, do_lower_case)
+  # for seg_len in [128, 256, 384, 512]:
+  for seg_len in [128]:
+    minimize_language("dev_type1_anti_stereotype", "english", "v4_auto_conll",  labels, stats, vocab_file, \
+      seg_len, input_dir, output_dir, do_lower_case, triggers)
     # minimize_language("chinese", labels, stats, vocab_file, seg_len)
     # minimize_language("es", labels, stats, vocab_file, seg_len)
     # minimize_language("arabic", labels, stats, vocab_file, seg_len)

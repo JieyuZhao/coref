@@ -579,22 +579,32 @@ class CorefModel(object):
     print("---For evaluating, the trigger tokens are:", trigger_token_ids, tokens)
     if self.eval_data is None:
       def load_line(line):
-        # example = json.loads(line)
-        example = line
+        example = json.loads(line)
+        # example = line
         return self.tensorize_example(example, is_training=False), example
-      # with open(self.config["eval_path"]) as f:
-      #   self.eval_data = [load_line(l) for l in f.readlines()]
-      labels = collections.defaultdict(set)
-      stats = collections.defaultdict(int)
-      documents = minimize.minimize_language("test_type1_anti_stereotype", "english", "v4_auto_conll", \
-        labels = labels,\
-          stats = stats, \
-        vocab_file='cased_config_vocab/vocab.txt', seg_len = 384, input_dir='./data', \
-          output_dir="./data", do_lower_case=False, triggers=tokens)
-      self.eval_data = [load_line(l) for l in documents]
-      num_words = sum(tensorized_example[2].sum() for tensorized_example, _ in self.eval_data)
-      print("Loaded {} eval examples.".format(len(self.eval_data)))
-      print("eval data instances:", documents[:2])
+      with open(self.config["eval_path"]) as f:
+        self.eval_data = [load_line(l) for l in f.readlines()]
+      # labels = collections.defaultdict(set)
+      # stats = collections.defaultdict(int)
+      # documents = minimize.minimize_language("dev_type1_anti_stereotype", "english", "v4_auto_conll", \
+      #   labels = labels,\
+      #     stats = stats, \
+      #   vocab_file='cased_config_vocab/vocab.txt', seg_len = 384, input_dir='./data', \
+      #     output_dir="./data", do_lower_case=False, triggers=tokens)
+      # self.eval_data = [load_line(l) for l in documents]
+      
+    print("updating new triggers to eval dataset")
+    for tensorized_example, example in self.eval_data:
+      inputids = tensorized_example[0][0]
+      inputids[1:4] = trigger_token_ids[0]
+      tensorized_example[0][0] = inputids
+      inputsen = example["sentences"][0]
+      inputsen[1:4] = tokens
+      example["sentences"] = [inputsen]
+
+    num_words = sum(tensorized_example[2].sum() for tensorized_example, _ in self.eval_data)
+    # print("eval data instances:", self.eval_data[0])
+    print("Loaded {} eval examples.".format(len(self.eval_data)))
 
   def evaluate(self, session, global_step=None, official_stdout=False, keys=None, eval_mode=False, trigger_token_ids=None):
     self.load_eval_data(trigger_token_ids)

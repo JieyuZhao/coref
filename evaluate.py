@@ -6,7 +6,7 @@ from __future__ import print_function
 import os
 
 import tensorflow as tf
-import util
+import util_baseline as util
 
 def read_doc_keys(fname):
     keys = set()

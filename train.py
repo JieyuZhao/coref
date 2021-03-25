@@ -39,9 +39,10 @@ if __name__ == "__main__":
     model.start_enqueue_thread(session)
     accumulated_loss = 0.0
 
-    ckpt = tf.train.get_checkpoint_state("data/spanbert_base")
+    ckpt = tf.train.get_checkpoint_state("data/train_spanbert_base")
+    print("--ckpt:", ckpt)
     if ckpt and ckpt.model_checkpoint_path:
-      checkpoint_path = os.path.join("data/spanbert_base", "model.max.ckpt")
+      checkpoint_path = os.path.join("data/train_spanbert_base", "model.max.ckpt")
       print("Restoring from: {}".format(checkpoint_path))
       saver.restore(session, checkpoint_path)
       mode = 'a'
@@ -52,6 +53,7 @@ if __name__ == "__main__":
     initial_time = time.time()
     trigger_token_ids = [[170, 170, 170]]
     cnt = 0
+    best_triggers = ""
     while True:
       if cnt != 0:
         next_input = session.run(model.input_tensors, feed_dict={model.trigger_token_ids: trigger_token_ids})
@@ -65,28 +67,13 @@ if __name__ == "__main__":
             feed_dict={model.trigger_token_ids: trigger_token_ids})
 
       
-      print('--tf global_step', tf_global_step)
+      # print('--tf global_step', tf_global_step)
       # print("outside, input_tensors:", input_tensors)
       # print("tf_loss:", tf_loss)
       
       
       trigger_token_ids = model.get_trigger_token_ids(session, input_tensors)
       
-      # # trigger_token_ids = input_tensors[-1]
-      # # cand_trigger_token_ids = session.run(model.hotflip_attack(batch_grad[0].values[1:4],
-      # #                                                   model.word_embeddings,
-      # #                                                   trigger_token_ids,
-      # #                                                   num_candidates=40))
-
-      # # trigger_token_ids = model.get_best_candidates(session,
-      # #                                               input_tensors,
-      # #                                                 trigger_token_ids,
-      # #                                                 cand_trigger_token_ids,
-      # #                                                 ) 
-      # print("new trigger_token_ids:", trigger_token_ids)
-
-      # print("==========="*4)
-
       accumulated_loss += tf_loss
 
       if tf_global_step % report_frequency == 0:
@@ -102,11 +89,12 @@ if __name__ == "__main__":
       cnt += 1
       if tf_global_step  > 0 and tf_global_step % eval_frequency == 0:
         saver.save(session, os.path.join(log_dir, "model"), global_step=tf_global_step)
-        print("current trigger token ids:", trigger_token_ids)
         eval_summary, eval_f1 = model.evaluate(session, tf_global_step, trigger_token_ids = trigger_token_ids)
-        print(f"max_f1: {max_f1}; eval_f1:{eval_f1}")
+        print("current trigger token ids:", trigger_token_ids)
+        print(f"max_f1: {max_f1}; eval_f1:{eval_f1}, best_triggers:{best_triggers}")
         if eval_f1 > max_f1:
           max_f1 = eval_f1
+          best_triggers = ", ".join([model.vocab[x] for x in trigger_token_ids[0]])
           util.copy_checkpoint(os.path.join(log_dir, "model-{}".format(tf_global_step)), os.path.join(log_dir, "model.max.ckpt"))
 
         writer.add_summary(eval_summary, tf_global_step)
