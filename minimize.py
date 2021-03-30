@@ -190,8 +190,8 @@ def skip(doc_key):
   return False
 
 def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir):
-  input_path = "{}/{}.{}.{}".format(input_dir, name, language, extension)
-  output_path = "{}/{}.{}.{}.jsonlines".format(output_dir, name, language, seg_len)
+  input_path = "{}/{}.{}.{}_triggers".format(input_dir, name, language, extension)
+  output_path = "{}/{}.{}.{}_triggers.jsonlines".format(output_dir, name, language, seg_len)
   count = 0
   print("Minimizing {}".format(input_path))
   documents = []
@@ -216,8 +216,8 @@ def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_
       count += 1
   print("Wrote {} documents to {}".format(count, output_path))
 
-def minimize_partition_jy(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, trigger_tokens=None):
-  input_path = "{}/{}.{}".format(input_dir, name, extension)
+def minimize_conll_jy(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, trigger_tokens=None):
+  input_path = "{}/{}.{}.{}".format(input_dir, name, language, extension)
   # output_path = "{}/{}.{}_triggers.jsonlines".format(output_dir, name, seg_len)
   output_path = input_path + "_triggers"
   count = 0
@@ -229,9 +229,10 @@ def minimize_partition_jy(name, language, extension, labels, stats, tokenizer, s
       if begin_document_match:
         doc_key = conll.get_doc_key(begin_document_match.group(1), begin_document_match.group(2))
         documents.append(line)
+        part_id = str(int(begin_document_match.group(2)) % 100)
         if trigger_tokens != None:
           for idx in range(len(trigger_tokens)):
-            documents.append('\t'.join([doc_key, "0", str(-len(trigger_tokens) + idx), trigger_tokens[idx], '-', '-', '-', '-', '-', 'Speaker#1', '*', '*', '*', '*', '-'])+"\n")
+            documents.append('\t'.join([begin_document_match.group(1), part_id, str(-len(trigger_tokens) + idx), trigger_tokens[idx], '-', '-', '-', '-', '-', 'Speaker#1', '*', '*', '*', '*', '-'])+"\n")
       elif line.startswith("#end document"):
         documents.append(line)
       else:
@@ -251,8 +252,8 @@ def minimize_language(filename,language, extension, labels, stats, vocab_file, s
                 vocab_file=vocab_file, do_lower_case=do_lower_case)
   # minimize_partition("dev.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
   # minimize_partition("train.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  # minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  return minimize_partition_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
+  minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  # minimize_conll_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
 
 if __name__ == "__main__":
   vocab_file = sys.argv[1]
@@ -266,8 +267,8 @@ if __name__ == "__main__":
   if not os.path.isdir(output_dir):
     os.mkdir(output_dir)
   # for seg_len in [128, 256, 384, 512]:
-  for seg_len in [128]:
-    minimize_language("dev_type1_anti_stereotype", "english", "v4_auto_conll",  labels, stats, vocab_file, \
+  for seg_len in [384]:
+    minimize_language("test", "english", "v4_gold_conll",  labels, stats, vocab_file, \
       seg_len, input_dir, output_dir, do_lower_case, triggers)
     # minimize_language("chinese", labels, stats, vocab_file, seg_len)
     # minimize_language("es", labels, stats, vocab_file, seg_len)
