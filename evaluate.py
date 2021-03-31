@@ -3,10 +3,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
+import os, sys
+import numpy as np
 
 import tensorflow as tf
-import util_baseline as util
+import util as util
 
 def read_doc_keys(fname):
     keys = set()
@@ -22,5 +23,6 @@ if __name__ == "__main__":
   log_dir = config["log_dir"]
   with tf.Session() as session:
     model.restore(session)
+    trigger_ids = np.array([[int(x) for x in sys.argv[2].split(",")]]) #[ 1109 13307 12680]
     # Make sure eval mode is True if you want official conll results
-    model.evaluate(session, official_stdout=True, eval_mode=True)
+    model.evaluate(session, official_stdout=True, eval_mode=True, trigger_token_ids=trigger_ids)
