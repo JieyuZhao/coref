@@ -39,25 +39,31 @@ if __name__ == "__main__":
     model.start_enqueue_thread(session)
     accumulated_loss = 0.0
 
-    ckpt = tf.train.get_checkpoint_state("data/train_spanbert_base")
+    ckpt = tf.train.get_checkpoint_state(log_dir)
     print("--ckpt:", ckpt)
     if ckpt and ckpt.model_checkpoint_path:
-      checkpoint_path = os.path.join("data/train_spanbert_base", "model.max.ckpt")
+      checkpoint_path = os.path.join(log_dir, "model.max.ckpt")
       print("Restoring from: {}".format(checkpoint_path))
       saver.restore(session, checkpoint_path)
       mode = 'a'
+    else:
+      print("start fine-tuning from pretrained spanbert")
+      checkpoint_path = os.path.join("data/train_spanbert_base", "model.max.ckpt") 
+      saver.restore(session, checkpoint_path)
+      mode = 'a' 
     fh = logging.FileHandler(os.path.join(log_dir, 'stdout.log'), mode=mode)
     fh.setFormatter(logging.Formatter(format))
     logger.addHandler(fh)
 
     initial_time = time.time()
-    trigger_token_ids = [[170, 170, 170]]
+    trigger_token_ids = [[170]* int(config["num_triggers"])]
     cnt = 0
     best_triggers = ""
+    best_trigger_ids = None
     while True:
       if cnt != 0:
         next_input = session.run(model.input_tensors, feed_dict={model.trigger_token_ids: trigger_token_ids})
-        next_input[0][0][1:4] = trigger_token_ids[0]
+        next_input[0][0][1:1+int(config["num_triggers"])] = trigger_token_ids[0]
         tf_loss, tf_global_step, _, batch_grad, input_tensors, = session.run([model.loss, model.global_step, \
           model.train_op, model.batch_grad, model.instance_tensors], \
             feed_dict={i:t for i,t in zip(model.input_tensors, next_input)})
@@ -95,12 +101,14 @@ if __name__ == "__main__":
         if eval_f1 > max_f1:
           max_f1 = eval_f1
           best_triggers = ", ".join([model.vocab[x] for x in trigger_token_ids[0]])
+          best_trigger_ids = trigger_token_ids
           util.copy_checkpoint(os.path.join(log_dir, "model-{}".format(tf_global_step)), os.path.join(log_dir, "model.max.ckpt"))
 
         writer.add_summary(eval_summary, tf_global_step)
         writer.add_summary(util.make_summary({"max_eval_f1": max_f1}), tf_global_step)
 
         logger.info("[{}] evaL_f1={:.4f}, max_f1={:.4f}".format(tf_global_step, eval_f1, max_f1))
+        logger.info("[{}] best_triggers_ids={}, best_triggers={}".format(tf_global_step, best_trigger_ids, best_triggers))
         # if tf_global_step > max_steps:
         if cnt > max_steps:
           break

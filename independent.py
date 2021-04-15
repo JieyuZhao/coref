@@ -2,7 +2,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os,sys
+import os
+import sys
 import random
 import math
 import json
@@ -26,707 +27,830 @@ from pytorch_to_tf import load_from_pytorch_checkpoint
 
 
 class CorefModel(object):
-  def __init__(self, config):
-    self.config = config
-    self.max_segment_len = config['max_segment_len']
-    self.max_span_width = config["max_span_width"]
-    self.genres = { g:i for i,g in enumerate(config["genres"]) }
-    self.subtoken_maps = {}
-    self.gold = {}
-    self.eval_data = None # Load eval data lazily.
-    self.bert_config = modeling.BertConfig.from_json_file(config["bert_config_file"])
-    self.tokenizer = tokenization.FullTokenizer(
-                vocab_file=config['vocab_file'], do_lower_case=False)
+    def __init__(self, config):
+        self.config = config
+        self.max_segment_len = config['max_segment_len']
+        self.max_span_width = config["max_span_width"]
+        self.genres = {g: i for i, g in enumerate(config["genres"])}
+        self.subtoken_maps = {}
+        self.gold = {}
+        self.eval_data = None  # Load eval data lazily.
+        self.bert_config = modeling.BertConfig.from_json_file(
+            config["bert_config_file"])
+        self.tokenizer = tokenization.FullTokenizer(
+            vocab_file=config['vocab_file'], do_lower_case=False)
 
-    input_props = []
-    input_props.append((tf.int32, [None, None])) # input_ids.
-    input_props.append((tf.int32, [None, None])) # input_mask
-    input_props.append((tf.int32, [None])) # Text lengths.
-    input_props.append((tf.int32, [None, None])) # Speaker IDs.
-    input_props.append((tf.int32, [])) # Genre.
-    input_props.append((tf.bool, [])) # Is training.
-    input_props.append((tf.int32, [None])) # Gold starts.
-    input_props.append((tf.int32, [None])) # Gold ends.
-    input_props.append((tf.int32, [None])) # Cluster ids.
-    input_props.append((tf.int32, [None])) # Sentence Map
-    input_props.append((tf.int32, [None, None])) # trigger_ids 
-    self.queue_input_tensors = [tf.placeholder(dtype, shape) for dtype, shape in input_props]
-    dtypes, shapes = zip(*input_props)
-    queue = tf.PaddingFIFOQueue(capacity=10, dtypes=dtypes, shapes=shapes)
-    self.enqueue_op = queue.enqueue(self.queue_input_tensors)
-    self.input_tensors = queue.dequeue()
-    self.trigger_token_ids = tf.placeholder(tf.int32, [None, None])
-    self.input_tensors[-1] = self.trigger_token_ids
-    
-    self.vocab = self.tokenizer.inv_vocab
-    # self.update_input_tensors()
-    self.predictions, self.loss, self.word_embeddings, self.instance_tensors = self.get_predictions_and_loss(*self.input_tensors)
-    # bert stuff
-    tvars = tf.trainable_variables()
-    # If you're using TF weights only, tf_checkpoint and init_checkpoint can be the same
-    # Get the assignment map from the tensorflow checkpoint. Depending on the extension, use TF/Pytorch to load weights.
-    assignment_map, initialized_variable_names = modeling.get_assignment_map_from_checkpoint(tvars, config['tf_checkpoint'])
-    init_from_checkpoint = tf.train.init_from_checkpoint if config['init_checkpoint'].endswith('ckpt') else load_from_pytorch_checkpoint
-    init_from_checkpoint(config['init_checkpoint'], assignment_map)
-    gvar = []
+        input_props = []
+        input_props.append((tf.int32, [None, None]))  # input_ids.
+        input_props.append((tf.int32, [None, None]))  # input_mask
+        input_props.append((tf.int32, [None]))  # Text lengths.
+        input_props.append((tf.int32, [None, None]))  # Speaker IDs.
+        input_props.append((tf.int32, []))  # Genre.
+        input_props.append((tf.bool, []))  # Is training.
+        input_props.append((tf.int32, [None]))  # Gold starts.
+        input_props.append((tf.int32, [None]))  # Gold ends.
+        input_props.append((tf.int32, [None]))  # Cluster ids.
+        input_props.append((tf.int32, [None]))  # Sentence Map
+        input_props.append((tf.int32, [None, None]))  # trigger_ids
+        self.queue_input_tensors = [tf.placeholder(
+            dtype, shape) for dtype, shape in input_props]
+        dtypes, shapes = zip(*input_props)
+        queue = tf.PaddingFIFOQueue(capacity=10, dtypes=dtypes, shapes=shapes)
+        self.enqueue_op = queue.enqueue(self.queue_input_tensors)
+        self.input_tensors = queue.dequeue()
+        self.trigger_token_ids = tf.placeholder(tf.int32, [None, None])
+        self.input_tensors[-1] = self.trigger_token_ids
 
-    print("**** Trainable Variables ****")
-    for var in tvars:
-      init_string = ""
-      if var.name in initialized_variable_names:
-        init_string = ", *INIT_FROM_CKPT*"
-      # tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
-                      # init_string)
-      print("  name = %s, shape = %s%s" % (var.name, var.shape, init_string))
-      if var.name == 'bert/embeddings/word_embeddings:0':
-        gvar.append(var)
-  
-    num_train_steps = int(
-                    self.config['num_docs'] * self.config['num_epochs'])
-    num_warmup_steps = int(num_train_steps * 0.1)
-    self.global_step = tf.train.get_or_create_global_step()
-    self.train_op = optimization.create_custom_optimizer(tvars,
-                      self.loss, self.config['bert_learning_rate'], self.config['task_learning_rate'],
-                      num_train_steps, num_warmup_steps, False, self.global_step, freeze=-1,
-                      task_opt=self.config['task_optimizer'], eps=config['adam_eps'])
-    self.batch_grad = tf.gradients(self.loss, gvar)
-    # self.get_trigger_token_ids(session, self.instance_tensors)
+        self.vocab = self.tokenizer.inv_vocab
+        # self.update_input_tensors()
+        self.predictions, self.loss, self.word_embeddings, self.instance_tensors = self.get_predictions_and_loss(
+            *self.input_tensors)
+        # bert stuff
+        tvars = tf.trainable_variables()
+        # If you're using TF weights only, tf_checkpoint and init_checkpoint can be the same
+        # Get the assignment map from the tensorflow checkpoint. Depending on the extension, use TF/Pytorch to load weights.
+        assignment_map, initialized_variable_names = modeling.get_assignment_map_from_checkpoint(
+            tvars, config['tf_checkpoint'])
+        init_from_checkpoint = tf.train.init_from_checkpoint if config['init_checkpoint'].endswith(
+            'ckpt') else load_from_pytorch_checkpoint
+        init_from_checkpoint(config['init_checkpoint'], assignment_map)
+        gvar = []
 
-  def get_trigger_token_ids(self, session, instance_tensors):
-    trigger_ids = instance_tensors[-1]
-    cand_trigger_token_ids = session.run(self.hotflip_attack(self.batch_grad[0].values[1:4],
-                                                        self.word_embeddings,
-                                                        trigger_ids,
-                                                       num_candidates=40))
-    new_trigger_token_ids = session.run(self.get_best_candidates(session,
-                                                    instance_tensors,
-                                                      trigger_ids,
-                                                      cand_trigger_token_ids,
-                                                    ))
-    # self.update_input_tensors()
-    return new_trigger_token_ids
-    # trigger_ids
+        print("**** Trainable Variables ****")
+        for var in tvars:
+            init_string = ""
+            if var.name in initialized_variable_names:
+                init_string = ", *INIT_FROM_CKPT*"
+            # tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+                # init_string)
+            print("  name = %s, shape = %s%s" %
+                  (var.name, var.shape, init_string))
+            if var.name == 'bert/embeddings/word_embeddings:0':
+                gvar.append(var)
 
-  def update_input_tensors(self):
-    self.input_tensors[-1] = self.trigger_token_ids
-    
+        num_train_steps = int(
+            self.config['num_docs'] * self.config['num_epochs'])
+        num_warmup_steps = int(num_train_steps * 0.1)
+        self.global_step = tf.train.get_or_create_global_step()
+        self.train_op = optimization.create_custom_optimizer(tvars,
+                                                             self.loss, self.config['bert_learning_rate'], self.config[
+                                                                 'task_learning_rate'],
+                                                             num_train_steps, num_warmup_steps, False, self.global_step, freeze=-1,
+                                                             task_opt=self.config['task_optimizer'], eps=config['adam_eps'])
+        self.batch_grad = tf.gradients(self.loss, gvar)
+        # self.get_trigger_token_ids(session, self.instance_tensors)
 
-  def start_enqueue_thread(self, session):
-    with open(self.config["train_path"]) as f:
-      train_examples = [json.loads(jsonline) for jsonline in f.readlines()]
-      print(f"in total, {len(train_examples)} training examples")
-    def _enqueue_loop():
-      count = 0
-      while True:
-        # random.shuffle(train_examples)
-        if self.config['single_example']:
-          for example in train_examples:
-            tensorized_example = self.tensorize_example(example, is_training=True)
-            # if count < 4:
-            #   print("tensorized_example:", tensorized_example)
-            count += 1
-            feed_dict = dict(zip(self.queue_input_tensors, tensorized_example))
-            session.run(self.enqueue_op, feed_dict=feed_dict)
-            session.run(self.enqueue_op, feed_dict=feed_dict)
+    def get_trigger_token_ids(self, session, instance_tensors):
+        trigger_ids = instance_tensors[-1]
+        cand_trigger_token_ids = session.run(self.hotflip_attack(self.batch_grad[0].values[1:1+int(self.config["num_triggers"])],
+                                                                 self.word_embeddings,
+                                                                 trigger_ids,
+                                                                 num_candidates=40))
+        new_trigger_token_ids = session.run(self.get_best_candidates(session,
+                                                                     instance_tensors,
+                                                                     trigger_ids,
+                                                                     cand_trigger_token_ids,
+                                                                     ))
+        # self.update_input_tensors()
+        return new_trigger_token_ids
+        # trigger_ids
+
+    def update_input_tensors(self):
+        self.input_tensors[-1] = self.trigger_token_ids
+
+    def start_enqueue_thread(self, session):
+        with open(self.config["train_path"]) as f:
+            train_examples = [json.loads(jsonline)
+                              for jsonline in f.readlines()]
+            print(f"in total, {len(train_examples)} training examples")
+
+        def _enqueue_loop():
+            count = 0
+            while True:
+                # random.shuffle(train_examples)
+                if self.config['single_example']:
+                    for example in train_examples:
+                        tensorized_example = self.tensorize_example(
+                            example, is_training=True)
+                        # if count < 4:
+                        #   print("tensorized_example:", tensorized_example)
+                        count += 1
+                        feed_dict = dict(
+                            zip(self.queue_input_tensors, tensorized_example))
+                        session.run(self.enqueue_op, feed_dict=feed_dict)
+                        session.run(self.enqueue_op, feed_dict=feed_dict)
+                else:
+                    examples = []
+                    for example in train_examples:
+                        tensorized = self.tensorize_example(
+                            example, is_training=True)
+                        if type(tensorized) is not list:
+                            tensorized = [tensorized]
+                        examples += tensorized
+                    random.shuffle(examples)
+                    print('num examples', len(examples))
+                    for example in examples:
+                        feed_dict = dict(
+                            zip(self.queue_input_tensors, example))
+                        session.run(self.enqueue_op, feed_dict=feed_dict)
+        enqueue_thread = threading.Thread(target=_enqueue_loop)
+        enqueue_thread.daemon = True
+        enqueue_thread.start()
+
+    def restore(self, session):
+        # Don't try to restore unused variables from the TF-Hub ELMo module.
+        vars_to_restore = [v for v in tf.global_variables()]
+        saver = tf.train.Saver(vars_to_restore)
+        checkpoint_path = os.path.join(
+            self.config["log_dir"], "model.max.ckpt")
+        print("Restoring from {}".format(checkpoint_path))
+        session.run(tf.global_variables_initializer())
+        saver.restore(session, checkpoint_path)
+
+    def tensorize_mentions(self, mentions):
+        if len(mentions) > 0:
+            starts, ends = zip(*mentions)
         else:
-          examples = []
-          for example in train_examples:
-            tensorized = self.tensorize_example(example, is_training=True)
-            if type(tensorized) is not list:
-              tensorized = [tensorized]
-            examples += tensorized
-          random.shuffle(examples)
-          print('num examples', len(examples))
-          for example in examples:
-            feed_dict = dict(zip(self.queue_input_tensors, example))
-            session.run(self.enqueue_op, feed_dict=feed_dict)
-    enqueue_thread = threading.Thread(target=_enqueue_loop)
-    enqueue_thread.daemon = True
-    enqueue_thread.start()
-
-  def restore(self, session):
-    # Don't try to restore unused variables from the TF-Hub ELMo module.
-    vars_to_restore = [v for v in tf.global_variables() ]
-    saver = tf.train.Saver(vars_to_restore)
-    checkpoint_path = os.path.join(self.config["log_dir"], "model.max.ckpt")
-    print("Restoring from {}".format(checkpoint_path))
-    session.run(tf.global_variables_initializer())
-    saver.restore(session, checkpoint_path)
-
-
-  def tensorize_mentions(self, mentions):
-    if len(mentions) > 0:
-      starts, ends = zip(*mentions)
-    else:
-      starts, ends = [], []
-    return np.array(starts), np.array(ends)
-
-  def tensorize_span_labels(self, tuples, label_dict):
-    if len(tuples) > 0:
-      starts, ends, labels = zip(*tuples)
-    else:
-      starts, ends, labels = [], [], []
-    return np.array(starts), np.array(ends), np.array([label_dict[c] for c in labels])
-
-  def get_speaker_dict(self, speakers):
-    speaker_dict = {'UNK': 0, '[SPL]': 1}
-    for s in speakers:
-      if s not in speaker_dict and len(speaker_dict) < self.config['max_num_speakers']:
-        speaker_dict[s] = len(speaker_dict)
-    return speaker_dict
-
-
-  def tensorize_example(self, example, is_training, trigger_token_ids=None):
-    clusters = example["clusters"]
-
-    gold_mentions = sorted(tuple(m) for m in util.flatten(clusters))
-    gold_mention_map = {m:i for i,m in enumerate(gold_mentions)}
-    cluster_ids = np.zeros(len(gold_mentions))
-    for cluster_id, cluster in enumerate(clusters):
-      for mention in cluster:
-        cluster_ids[gold_mention_map[tuple(mention)]] = cluster_id + 1
-
-    sentences = example["sentences"]
-    num_words = sum(len(s) for s in sentences)
-    speakers = example["speakers"]
-    # assert num_words == len(speakers), (num_words, len(speakers))
-    speaker_dict = self.get_speaker_dict(util.flatten(speakers))
-    sentence_map = example['sentence_map']
-
-
-    max_sentence_length = self.max_segment_len
-    text_len = np.array([len(s) for s in sentences])
-
-    input_ids, input_mask, speaker_ids = [], [], []
-    for i, (sentence, speaker) in enumerate(zip(sentences, speakers)):
-      sent_input_ids = self.tokenizer.convert_tokens_to_ids(sentence)
-      sent_input_mask = [1] * len(sent_input_ids)
-      sent_speaker_ids = [speaker_dict.get(s, 3) for s in speaker]
-      while len(sent_input_ids) < max_sentence_length:
-          sent_input_ids.append(0)
-          sent_input_mask.append(0)
-          sent_speaker_ids.append(0)
-      input_ids.append(sent_input_ids)
-      speaker_ids.append(sent_speaker_ids)
-      input_mask.append(sent_input_mask)
-    input_ids = np.array(input_ids)
-    input_mask = np.array(input_mask)
-    speaker_ids = np.array(speaker_ids)
-    assert num_words == np.sum(input_mask), (num_words, np.sum(input_mask))
-
-
-    doc_key = example["doc_key"]
-    self.subtoken_maps[doc_key] = example.get("subtoken_map", None)
-    self.gold[doc_key] = example["clusters"]
-    genre = self.genres.get(doc_key[:2], 0)
-
-    gold_starts, gold_ends = self.tensorize_mentions(gold_mentions)
-    example_tensors = (input_ids, input_mask,  text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, input_ids[:, 1:4])
-
-    if is_training and len(sentences) > self.config["max_training_sentences"]:
-      if self.config['single_example']:
-        return self.truncate_example(*example_tensors)
-      else:
-        offsets = range(self.config['max_training_sentences'], len(sentences), self.config['max_training_sentences'])
-        tensor_list = [self.truncate_example(*(example_tensors + (offset,))) for offset in offsets]
-        return tensor_list
-    else:
-      return example_tensors
-
-  def truncate_example(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, sentence_offset=None):
-    max_training_sentences = self.config["max_training_sentences"]
-    num_sentences = input_ids.shape[0]
-    assert num_sentences > max_training_sentences
-
-    sentence_offset = random.randint(0, num_sentences - max_training_sentences) if sentence_offset is None else sentence_offset
-    word_offset = text_len[:sentence_offset].sum()
-    num_words = text_len[sentence_offset:sentence_offset + max_training_sentences].sum()
-    input_ids = input_ids[sentence_offset:sentence_offset + max_training_sentences, :]
-    input_mask = input_mask[sentence_offset:sentence_offset + max_training_sentences, :]
-    speaker_ids = speaker_ids[sentence_offset:sentence_offset + max_training_sentences, :]
-    text_len = text_len[sentence_offset:sentence_offset + max_training_sentences]
-
-    sentence_map = sentence_map[word_offset: word_offset + num_words]
-    gold_spans = np.logical_and(gold_ends >= word_offset, gold_starts < word_offset + num_words)
-    gold_starts = gold_starts[gold_spans] - word_offset
-    gold_ends = gold_ends[gold_spans] - word_offset
-    cluster_ids = cluster_ids[gold_spans]
-
-    return input_ids, input_mask, text_len, speaker_ids, genre, is_training,  gold_starts, gold_ends, cluster_ids, sentence_map
-
-  def get_candidate_labels(self, candidate_starts, candidate_ends, labeled_starts, labeled_ends, labels):
-    same_start = tf.equal(tf.expand_dims(labeled_starts, 1), tf.expand_dims(candidate_starts, 0)) # [num_labeled, num_candidates]
-    same_end = tf.equal(tf.expand_dims(labeled_ends, 1), tf.expand_dims(candidate_ends, 0)) # [num_labeled, num_candidates]
-    same_span = tf.logical_and(same_start, same_end) # [num_labeled, num_candidates]
-    candidate_labels = tf.matmul(tf.expand_dims(labels, 0), tf.to_int32(same_span)) # [1, num_candidates]
-    candidate_labels = tf.squeeze(candidate_labels, 0) # [num_candidates]
-    return candidate_labels
-
-  def get_dropout(self, dropout_rate, is_training):
-    return 1 - (tf.to_float(is_training) * dropout_rate)
-
-  def coarse_to_fine_pruning(self, top_span_emb, top_span_mention_scores, c):
-    k = util.shape(top_span_emb, 0)
-    top_span_range = tf.range(k) # [k]
-    antecedent_offsets = tf.expand_dims(top_span_range, 1) - tf.expand_dims(top_span_range, 0) # [k, k]
-    antecedents_mask = antecedent_offsets >= 1 # [k, k]
-    fast_antecedent_scores = tf.expand_dims(top_span_mention_scores, 1) + tf.expand_dims(top_span_mention_scores, 0) # [k, k]
-    fast_antecedent_scores += tf.log(tf.to_float(antecedents_mask)) # [k, k]
-    fast_antecedent_scores += self.get_fast_antecedent_scores(top_span_emb) # [k, k]
-    if self.config['use_prior']:
-      antecedent_distance_buckets = self.bucket_distance(antecedent_offsets) # [k, c]
-      distance_scores = util.projection(tf.nn.dropout(tf.get_variable("antecedent_distance_emb", [10, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), self.dropout), 1, initializer=tf.truncated_normal_initializer(stddev=0.02)) #[10, 1]
-      antecedent_distance_scores = tf.gather(tf.squeeze(distance_scores, 1), antecedent_distance_buckets) # [k, c]
-      fast_antecedent_scores += antecedent_distance_scores
-
-    _, top_antecedents = tf.nn.top_k(fast_antecedent_scores, c, sorted=False) # [k, c]
-    top_antecedents_mask = util.batch_gather(antecedents_mask, top_antecedents) # [k, c]
-    top_fast_antecedent_scores = util.batch_gather(fast_antecedent_scores, top_antecedents) # [k, c]
-    top_antecedent_offsets = util.batch_gather(antecedent_offsets, top_antecedents) # [k, c]
-    return top_antecedents, top_antecedents_mask, top_fast_antecedent_scores, top_antecedent_offsets
-
-
-  def get_predictions_and_loss(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids):
-
-    
-    
-    model = modeling.BertModel(
-      config=self.bert_config,
-      is_training=is_training,
-      input_ids=input_ids,
-      input_mask=input_mask,
-      use_one_hot_embeddings=False,
-      scope='bert')
-    
-    params = [input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids] 
-
-    all_encoder_layers = model.get_all_encoder_layers()
-    mention_doc = model.get_sequence_output()
-    word_embeddings = model.get_embedding_table()
-
-
-    self.dropout = self.get_dropout(self.config["dropout_rate"], is_training)
-
-    num_sentences = tf.shape(mention_doc)[0]
-    max_sentence_length = tf.shape(mention_doc)[1]
-    mention_doc = self.flatten_emb_by_sentence(mention_doc, input_mask)
-    num_words = util.shape(mention_doc, 0)
-    antecedent_doc = mention_doc
-
-
-    flattened_sentence_indices = sentence_map
-    candidate_starts = tf.tile(tf.expand_dims(tf.range(num_words), 1), [1, self.max_span_width]) # [num_words, max_span_width]
-    candidate_ends = candidate_starts + tf.expand_dims(tf.range(self.max_span_width), 0) # [num_words, max_span_width]
-    candidate_start_sentence_indices = tf.gather(flattened_sentence_indices, candidate_starts) # [num_words, max_span_width]
-    candidate_end_sentence_indices = tf.gather(flattened_sentence_indices, tf.minimum(candidate_ends, num_words - 1)) # [num_words, max_span_width]
-    candidate_mask = tf.logical_and(candidate_ends < num_words, tf.equal(candidate_start_sentence_indices, candidate_end_sentence_indices)) # [num_words, max_span_width]
-    flattened_candidate_mask = tf.reshape(candidate_mask, [-1]) # [num_words * max_span_width]
-    candidate_starts = tf.boolean_mask(tf.reshape(candidate_starts, [-1]), flattened_candidate_mask) # [num_candidates]
-    candidate_ends = tf.boolean_mask(tf.reshape(candidate_ends, [-1]), flattened_candidate_mask) # [num_candidates]
-    candidate_sentence_indices = tf.boolean_mask(tf.reshape(candidate_start_sentence_indices, [-1]), flattened_candidate_mask) # [num_candidates]
-
-    candidate_cluster_ids = self.get_candidate_labels(candidate_starts, candidate_ends, gold_starts, gold_ends, cluster_ids) # [num_candidates]
-
-    candidate_span_emb = self.get_span_emb(mention_doc, mention_doc, candidate_starts, candidate_ends) # [num_candidates, emb]
-    candidate_mention_scores =  self.get_mention_scores(candidate_span_emb, candidate_starts, candidate_ends)
-    candidate_mention_scores = tf.squeeze(candidate_mention_scores, 1) # [k]
-
-    # beam size
-    k = tf.minimum(3900, tf.to_int32(tf.floor(tf.to_float(num_words) * self.config["top_span_ratio"])))
-    c = tf.minimum(self.config["max_top_antecedents"], k)
-    # pull from beam
-    top_span_indices = coref_ops.extract_spans(tf.expand_dims(candidate_mention_scores, 0),
-                                               tf.expand_dims(candidate_starts, 0),
-                                               tf.expand_dims(candidate_ends, 0),
-                                               tf.expand_dims(k, 0),
-                                               num_words,
-                                               True) # [1, k]
-    top_span_indices.set_shape([1, None])
-    top_span_indices = tf.squeeze(top_span_indices, 0) # [k]
-
-    top_span_starts = tf.gather(candidate_starts, top_span_indices) # [k]u8
-    top_span_ends = tf.gather(candidate_ends, top_span_indices) # [k]
-    top_span_emb = tf.gather(candidate_span_emb, top_span_indices) # [k, emb]
-    top_span_cluster_ids = tf.gather(candidate_cluster_ids, top_span_indices) # [k]
-    top_span_mention_scores = tf.gather(candidate_mention_scores, top_span_indices) # [k]
-    genre_emb = tf.gather(tf.get_variable("genre_embeddings", [len(self.genres), self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), genre) # [emb]
-    if self.config['use_metadata']:
-      speaker_ids = self.flatten_emb_by_sentence(speaker_ids, input_mask)
-      top_span_speaker_ids = tf.gather(speaker_ids, top_span_starts) # [k]i
-    else:
-        top_span_speaker_ids = None
-
-
-    dummy_scores = tf.zeros([k, 1]) # [k, 1]
-    top_antecedents, top_antecedents_mask, top_fast_antecedent_scores, top_antecedent_offsets = self.coarse_to_fine_pruning(top_span_emb, top_span_mention_scores, c)
-    num_segs, seg_len = util.shape(input_ids, 0), util.shape(input_ids, 1)
-    word_segments = tf.tile(tf.expand_dims(tf.range(0, num_segs), 1), [1, seg_len])
-    flat_word_segments = tf.boolean_mask(tf.reshape(word_segments, [-1]), tf.reshape(input_mask, [-1]))
-    mention_segments = tf.expand_dims(tf.gather(flat_word_segments, top_span_starts), 1) # [k, 1]
-    antecedent_segments = tf.gather(flat_word_segments, tf.gather(top_span_starts, top_antecedents)) #[k, c]
-    segment_distance = tf.clip_by_value(mention_segments - antecedent_segments, 0, self.config['max_training_sentences'] - 1) if self.config['use_segment_distance'] else None #[k, c]
-    if self.config['fine_grained']:
-      for i in range(self.config["coref_depth"]):
-        with tf.variable_scope("coref_layer", reuse=(i > 0)):
-          top_antecedent_emb = tf.gather(top_span_emb, top_antecedents) # [k, c, emb]
-          top_antecedent_scores = top_fast_antecedent_scores + self.get_slow_antecedent_scores(top_span_emb, top_antecedents, top_antecedent_emb, top_antecedent_offsets, top_span_speaker_ids, genre_emb, segment_distance) # [k, c]
-          top_antecedent_weights = tf.nn.softmax(tf.concat([dummy_scores, top_antecedent_scores], 1)) # [k, c + 1]
-          top_antecedent_emb = tf.concat([tf.expand_dims(top_span_emb, 1), top_antecedent_emb], 1) # [k, c + 1, emb]
-          attended_span_emb = tf.reduce_sum(tf.expand_dims(top_antecedent_weights, 2) * top_antecedent_emb, 1) # [k, emb]
-          with tf.variable_scope("f"):
-            f = tf.sigmoid(util.projection(tf.concat([top_span_emb, attended_span_emb], 1), util.shape(top_span_emb, -1))) # [k, emb]
-            top_span_emb = f * attended_span_emb + (1 - f) * top_span_emb # [k, emb]
-      
-    else:
-        top_antecedent_scores = top_fast_antecedent_scores
-
-    top_antecedent_scores = tf.concat([dummy_scores, top_antecedent_scores], 1) # [k, c + 1]
-
-    top_antecedent_cluster_ids = tf.gather(top_span_cluster_ids, top_antecedents) # [k, c]
-    top_antecedent_cluster_ids += tf.to_int32(tf.log(tf.to_float(top_antecedents_mask))) # [k, c]
-    same_cluster_indicator = tf.equal(top_antecedent_cluster_ids, tf.expand_dims(top_span_cluster_ids, 1)) # [k, c]
-    non_dummy_indicator = tf.expand_dims(top_span_cluster_ids > 0, 1) # [k, 1]
-    pairwise_labels = tf.logical_and(same_cluster_indicator, non_dummy_indicator) # [k, c]
-    dummy_labels = tf.logical_not(tf.reduce_any(pairwise_labels, 1, keepdims=True)) # [k, 1]
-    top_antecedent_labels = tf.concat([dummy_labels, pairwise_labels], 1) # [k, c + 1]
-    loss = self.softmax_loss(top_antecedent_scores, top_antecedent_labels) # [k]
-    loss = tf.reduce_sum(loss) # []
-
-    return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores], loss, \
-      word_embeddings, params 
-
-
-  def get_span_emb(self, head_emb, context_outputs, span_starts, span_ends):
-    span_emb_list = []
-
-    span_start_emb = tf.gather(context_outputs, span_starts) # [k, emb]
-    span_emb_list.append(span_start_emb)
-
-    span_end_emb = tf.gather(context_outputs, span_ends) # [k, emb]
-    span_emb_list.append(span_end_emb)
-
-    span_width = 1 + span_ends - span_starts # [k]
-
-    if self.config["use_features"]:
-      span_width_index = span_width - 1 # [k]
-      span_width_emb = tf.gather(tf.get_variable("span_width_embeddings", [self.config["max_span_width"], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), span_width_index) # [k, emb]
-      span_width_emb = tf.nn.dropout(span_width_emb, self.dropout)
-      span_emb_list.append(span_width_emb)
-
-    if self.config["model_heads"]:
-      mention_word_scores = self.get_masked_mention_word_scores(context_outputs, span_starts, span_ends)
-      head_attn_reps = tf.matmul(mention_word_scores, context_outputs) # [K, T]
-      span_emb_list.append(head_attn_reps)
-
-    span_emb = tf.concat(span_emb_list, 1) # [k, emb]
-    return span_emb # [k, emb]
-
-
-  def get_mention_scores(self, span_emb, span_starts, span_ends):
-      with tf.variable_scope("mention_scores"):
-        span_scores = util.ffnn(span_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout) # [k, 1]
-      if self.config['use_prior']:
-        span_width_emb = tf.get_variable("span_width_prior_embeddings", [self.config["max_span_width"], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)) # [W, emb]
-        span_width_index = span_ends - span_starts # [NC]
-        with tf.variable_scope("width_scores"):
-          width_scores =  util.ffnn(span_width_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout) # [W, 1]
-        width_scores = tf.gather(width_scores, span_width_index)
-        span_scores += width_scores
-      return span_scores
-
-
-  def get_width_scores(self, doc, starts, ends):
-    distance = ends - starts
-    span_start_emb = tf.gather(doc, starts)
-    hidden = util.shape(doc, 1)
-    with tf.variable_scope('span_width'):
-      span_width_emb = tf.gather(tf.get_variable("start_width_embeddings", [self.config["max_span_width"], hidden], initializer=tf.truncated_normal_initializer(stddev=0.02)), distance) # [W, emb]
-    scores = tf.reduce_sum(span_start_emb * span_width_emb, axis=1)
-    return scores
-
-
-  def get_masked_mention_word_scores(self, encoded_doc, span_starts, span_ends):
-      num_words = util.shape(encoded_doc, 0) # T
-      num_c = util.shape(span_starts, 0) # NC
-      doc_range = tf.tile(tf.expand_dims(tf.range(0, num_words), 0), [num_c, 1]) # [K, T]
-      mention_mask = tf.logical_and(doc_range >= tf.expand_dims(span_starts, 1), doc_range <= tf.expand_dims(span_ends, 1)) #[K, T]
-      with tf.variable_scope("mention_word_attn"):
-        word_attn = tf.squeeze(util.projection(encoded_doc, 1, initializer=tf.truncated_normal_initializer(stddev=0.02)), 1)
-      mention_word_attn = tf.nn.softmax(tf.log(tf.to_float(mention_mask)) + tf.expand_dims(word_attn, 0))
-      return mention_word_attn
-
-
-  def softmax_loss(self, antecedent_scores, antecedent_labels):
-    gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels)) # [k, max_ant + 1]
-    marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1]) # [k]
-    log_norm = tf.reduce_logsumexp(antecedent_scores, [1]) # [k]
-    return log_norm - marginalized_gold_scores # [k]
-
-  def bucket_distance(self, distances):
-    """
-    Places the given values (designed for distances) into 10 semi-logscale buckets:
-    [0, 1, 2, 3, 4, 5-7, 8-15, 16-31, 32-63, 64+].
-    """
-    logspace_idx = tf.to_int32(tf.floor(tf.log(tf.to_float(distances))/math.log(2))) + 3
-    use_identity = tf.to_int32(distances <= 4)
-    combined_idx = use_identity * distances + (1 - use_identity) * logspace_idx
-    return tf.clip_by_value(combined_idx, 0, 9)
-
-  def get_slow_antecedent_scores(self, top_span_emb, top_antecedents, top_antecedent_emb, top_antecedent_offsets, top_span_speaker_ids, genre_emb, segment_distance=None):
-    k = util.shape(top_span_emb, 0)
-    c = util.shape(top_antecedents, 1)
-
-    feature_emb_list = []
-
-    if self.config["use_metadata"]:
-      top_antecedent_speaker_ids = tf.gather(top_span_speaker_ids, top_antecedents) # [k, c]
-      same_speaker = tf.equal(tf.expand_dims(top_span_speaker_ids, 1), top_antecedent_speaker_ids) # [k, c]
-      speaker_pair_emb = tf.gather(tf.get_variable("same_speaker_emb", [2, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), tf.to_int32(same_speaker)) # [k, c, emb]
-      feature_emb_list.append(speaker_pair_emb)
-
-      tiled_genre_emb = tf.tile(tf.expand_dims(tf.expand_dims(genre_emb, 0), 0), [k, c, 1]) # [k, c, emb]
-      feature_emb_list.append(tiled_genre_emb)
-
-    if self.config["use_features"]:
-      antecedent_distance_buckets = self.bucket_distance(top_antecedent_offsets) # [k, c]
-      antecedent_distance_emb = tf.gather(tf.get_variable("antecedent_distance_emb", [10, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), antecedent_distance_buckets) # [k, c]
-      feature_emb_list.append(antecedent_distance_emb)
-    if segment_distance is not None:
-      with tf.variable_scope('segment_distance', reuse=tf.AUTO_REUSE):
-        segment_distance_emb = tf.gather(tf.get_variable("segment_distance_embeddings", [self.config['max_training_sentences'], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), segment_distance) # [k, emb]
-      feature_emb_list.append(segment_distance_emb)
-
-    feature_emb = tf.concat(feature_emb_list, 2) # [k, c, emb]
-    feature_emb = tf.nn.dropout(feature_emb, self.dropout) # [k, c, emb]
-
-    target_emb = tf.expand_dims(top_span_emb, 1) # [k, 1, emb]
-    similarity_emb = top_antecedent_emb * target_emb # [k, c, emb]
-    target_emb = tf.tile(target_emb, [1, c, 1]) # [k, c, emb]
-
-    pair_emb = tf.concat([target_emb, top_antecedent_emb, similarity_emb, feature_emb], 2) # [k, c, emb]
-
-    with tf.variable_scope("slow_antecedent_scores"):
-      slow_antecedent_scores = util.ffnn(pair_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout) # [k, c, 1]
-    slow_antecedent_scores = tf.squeeze(slow_antecedent_scores, 2) # [k, c]
-    return slow_antecedent_scores # [k, c]
-
-  def get_fast_antecedent_scores(self, top_span_emb):
-    with tf.variable_scope("src_projection"):
-      source_top_span_emb = tf.nn.dropout(util.projection(top_span_emb, util.shape(top_span_emb, -1)), self.dropout) # [k, emb]
-    target_top_span_emb = tf.nn.dropout(top_span_emb, self.dropout) # [k, emb]
-    return tf.matmul(source_top_span_emb, target_top_span_emb, transpose_b=True) # [k, k]
-
-  def flatten_emb_by_sentence(self, emb, text_len_mask):
-    num_sentences = tf.shape(emb)[0]
-    max_sentence_length = tf.shape(emb)[1]
-
-    emb_rank = len(emb.get_shape())
-    if emb_rank  == 2:
-      flattened_emb = tf.reshape(emb, [num_sentences * max_sentence_length])
-    elif emb_rank == 3:
-      flattened_emb = tf.reshape(emb, [num_sentences * max_sentence_length, util.shape(emb, 2)])
-    else:
-      raise ValueError("Unsupported rank: {}".format(emb_rank))
-    return tf.boolean_mask(flattened_emb, tf.reshape(text_len_mask, [num_sentences * max_sentence_length]))
-
-
-  def get_predicted_antecedents(self, antecedents, antecedent_scores):
-    predicted_antecedents = []
-    for i, index in enumerate(np.argmax(antecedent_scores, axis=1) - 1):
-      if index < 0:
-        predicted_antecedents.append(-1)
-      else:
-        predicted_antecedents.append(antecedents[i, index])
-    return predicted_antecedents
-
-  def get_predicted_clusters(self, top_span_starts, top_span_ends, predicted_antecedents):
-    mention_to_predicted = {}
-    predicted_clusters = []
-    for i, predicted_index in enumerate(predicted_antecedents):
-      if predicted_index < 0:
-        continue
-      assert i > predicted_index, (i, predicted_index)
-      predicted_antecedent = (int(top_span_starts[predicted_index]), int(top_span_ends[predicted_index]))
-      if predicted_antecedent in mention_to_predicted:
-        predicted_cluster = mention_to_predicted[predicted_antecedent]
-      else:
-        predicted_cluster = len(predicted_clusters)
-        predicted_clusters.append([predicted_antecedent])
-        mention_to_predicted[predicted_antecedent] = predicted_cluster
-
-      mention = (int(top_span_starts[i]), int(top_span_ends[i]))
-      predicted_clusters[predicted_cluster].append(mention)
-      mention_to_predicted[mention] = predicted_cluster
-
-    predicted_clusters = [tuple(pc) for pc in predicted_clusters]
-    mention_to_predicted = { m:predicted_clusters[i] for m,i in mention_to_predicted.items() }
-
-    return predicted_clusters, mention_to_predicted
-
-  def evaluate_coref(self, top_span_starts, top_span_ends, predicted_antecedents, gold_clusters, evaluator):
-    gold_clusters = [tuple(tuple(m) for m in gc) for gc in gold_clusters]
-    mention_to_gold = {}
-    for gc in gold_clusters:
-      for mention in gc:
-        mention_to_gold[mention] = gc
-
-    predicted_clusters, mention_to_predicted = self.get_predicted_clusters(top_span_starts, top_span_ends, predicted_antecedents)
-    evaluator.update(predicted_clusters, gold_clusters, mention_to_predicted, mention_to_gold)
-    return predicted_clusters
-
-  def load_eval_data(self, trigger_token_ids):
-    tokens = [self.vocab[x] for x in trigger_token_ids[0]]
-    print("---For evaluating, the trigger tokens are:", trigger_token_ids, tokens)
-    if self.eval_data is None:
-      def load_line(line):
-        example = json.loads(line)
-        # example = line
-        return self.tensorize_example(example, is_training=False), example
-      with open(self.config["eval_path"]) as f:
-        self.eval_data = [load_line(l) for l in f.readlines()]
-      # labels = collections.defaultdict(set)
-      # stats = collections.defaultdict(int)
-      # documents = minimize.minimize_language("dev_type1_anti_stereotype", "english", "v4_auto_conll", \
-      #   labels = labels,\
-      #     stats = stats, \
-      #   vocab_file='cased_config_vocab/vocab.txt', seg_len = 384, input_dir='./data', \
-      #     output_dir="./data", do_lower_case=False, triggers=tokens)
-      # self.eval_data = [load_line(l) for l in documents]
-      
-    print("updating new triggers to eval dataset")
-    for tensorized_example, example in self.eval_data:
-      inputids = tensorized_example[0][0]
-      inputids[1:4] = trigger_token_ids[0]
-      tensorized_example[0][0] = inputids
-      inputsen = example["sentences"][0]
-      inputsen[1:4] = tokens
-      example["sentences"] = [inputsen]
-
-    num_words = sum(tensorized_example[2].sum() for tensorized_example, _ in self.eval_data)
-    # print("eval data instances:", self.eval_data[0])
-    print("Loaded {} eval examples.".format(len(self.eval_data)))
-
-  def evaluate(self, session, global_step=None, official_stdout=False, keys=None, eval_mode=False, trigger_token_ids=None):
-    self.load_eval_data(trigger_token_ids)
-
-    coref_predictions = {}
-    coref_evaluator = metrics.CorefEvaluator()
-    losses = []
-    doc_keys = []
-    num_evaluated= 0
-
-    for example_num, (tensorized_example, example) in enumerate(self.eval_data):
-      _, _, _, _, _, _, gold_starts, gold_ends, _, _,_ = tensorized_example
-      feed_dict = {i:t for i,t in zip(self.input_tensors, tensorized_example)}
-      # if tensorized_example[0].shape[0] <= 9:
-      if keys is not None and example['doc_key'] not in keys:
-        # print('Skipping...', example['doc_key'], tensorized_example[0].shape)
-        continue
-      doc_keys.append(example['doc_key'])
-      loss, (candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores) = session.run([self.loss, self.predictions], feed_dict=feed_dict)
-      # losses.append(session.run(self.loss, feed_dict=feed_dict))
-      losses.append(loss)
-      predicted_antecedents = self.get_predicted_antecedents(top_antecedents, top_antecedent_scores)
-      coref_predictions[example["doc_key"]] = self.evaluate_coref(top_span_starts, top_span_ends, predicted_antecedents, example["clusters"], coref_evaluator)
-      if example_num % 10 == 0:
-        print("Evaluated {}/{} examples.".format(example_num + 1, len(self.eval_data)))
-
-    summary_dict = {}
-    if eval_mode:
-      conll_results = conll.evaluate_conll(self.config["conll_eval_path"], coref_predictions, self.subtoken_maps, official_stdout )
-      average_f1 = sum(results["f"] for results in conll_results.values()) / len(conll_results)
-      summary_dict["Average F1 (conll)"] = average_f1
-      print("Average F1 (conll): {:.2f}%".format(average_f1))
-
-    p,r,f = coref_evaluator.get_prf()
-    summary_dict["Average F1 (py)"] = f
-    print("Average F1 (py): {:.2f}% on {} docs".format(f * 100, len(doc_keys)))
-    summary_dict["Average precision (py)"] = p
-    print("Average precision (py): {:.2f}%".format(p * 100))
-    summary_dict["Average recall (py)"] = r
-    print("Average recall (py): {:.2f}%".format(r * 100))
-
-    return util.make_summary(summary_dict), f
-
-  def hotflip_attack(self, averaged_grad, embedding_matrix, trigger_token_ids,
-                   increase_loss=False, num_candidates=1):
-    """
-    The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
-    the nice code of Paul Michel here https://github.com/pmichel31415/translate/blob/paul/
-    pytorch_translate/research/adversarial/adversaries/brute_force_adversary.py
-
-    This function takes in the model's average_grad over a batch of examples, the model's
-    token embedding matrix, and the current trigger token IDs. It returns the top token
-    candidates for each position.
-
-    If increase_loss=True, then the attack reverses the sign of the gradient and tries to increase
-    the loss (decrease the model's probability of the true class). For targeted attacks, you want
-    to decrease the loss of the target class (increase_loss=False).
-    """
-  
-    averaged_grad = tf.expand_dims(averaged_grad,0)
-    gradient_dot_embedding_matrix = tf.einsum("bij,kj->bik", averaged_grad, embedding_matrix )     
-    if not increase_loss:
-        gradient_dot_embedding_matrix *= -1    # lower versus increase the class probability.
-    if num_candidates > 1: # get top k options
-        _, best_k_ids = tf.math.top_k(gradient_dot_embedding_matrix, num_candidates)
-        return best_k_ids[0]
-    _, best_at_each_step = gradient_dot_embedding_matrix.max(2)
-    return best_at_each_step[0]
-
-
-  def get_best_candidates(self, session, input_tensors, trigger_token_ids, cand_trigger_token_ids, beam_size=1):
-      """"
-      Given the list of candidate trigger token ids (of number of trigger words by number of candidates
-      per word), it finds the best new candidate trigger.
-      This performs beam search in a left to right fashion.
-      """
-      # first round, no beams, just get the loss for each of the candidates in index 0.
-      # (indices 1-end are just the old trigger)
-
-      
-      loss_per_candidate = self.get_loss_per_candidate(session, 0,  input_tensors, trigger_token_ids,
-                                                  cand_trigger_token_ids)
-      
-      # minimize the loss
-      top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
-      # print("0 top_candiates:", top_candidates)
-      
-      # top_candidates now contains beam_size trigger sequences, each with a different 0th token
-      for idx in range(1, len(trigger_token_ids[0])): # for all trigger tokens, skipping the 0th (we did it above)
-          loss_per_candidate = []
-          input_tensors[-1] = top_candidates[0][0]
-          input_tensors[0][0][1:4] = top_candidates[0][0]
-          for cand, _ in top_candidates: # for all the beams, try all the candidates at idx
-              loss_per_candidate.extend(self.get_loss_per_candidate(session, idx, input_tensors, cand,
-                                                              cand_trigger_token_ids))
-          top_candidates = heapq.nsmallest(beam_size, loss_per_candidate, key=itemgetter(1))
-          # print(f"{idx}: top_candiates: {top_candidates}")
-      return tf.convert_to_tensor(min(top_candidates, key=itemgetter(1))[0])
-
-  def get_loss_per_candidate(self, session, index, input_tensors, trigger_token_ids, cand_trigger_token_ids):
-      """
-      For a particular index, the function tries all of the candidate tokens for that index.
-      The function returns a list containing the candidate triggers it tried, along with their loss.
-      """
-      if isinstance(cand_trigger_token_ids[0], (np.int64, int)):
-          print("Only 1 candidate for index detected, not searching")
-          return trigger_token_ids
-      loss_per_candidate = []
-      
-      # print("inside input tensors:", input_tensors)
-      # loss for the trigger without trying the candidates
-      feed_dict = {i:t for i,t in zip(self.input_tensors, input_tensors)}
-      curr_loss = session.run([self.loss], feed_dict=feed_dict)
-      loss_per_candidate.append((deepcopy(trigger_token_ids), curr_loss))
-      for cand_id in range(len(cand_trigger_token_ids[0])):
-          trigger_token_ids_one_replaced = deepcopy(np.array(trigger_token_ids)) # copy trigger
-          trigger_token_ids_one_replaced[0][index] = cand_trigger_token_ids[index][cand_id] # replace one token
-          
-          input_tensors[0][0][1+index] = cand_trigger_token_ids[index][cand_id]  ##deepcopy problem
-          # print("replaced input_tensors:", input_tensors)
-
-          feed_dict = {i:t for i,t in zip(self.input_tensors, input_tensors)}
-          loss = session.run([self.loss], feed_dict=feed_dict)
-          loss_per_candidate.append((deepcopy(trigger_token_ids_one_replaced), loss))
-      return loss_per_candidate
+            starts, ends = [], []
+        return np.array(starts), np.array(ends)
+
+    def tensorize_span_labels(self, tuples, label_dict):
+        if len(tuples) > 0:
+            starts, ends, labels = zip(*tuples)
+        else:
+            starts, ends, labels = [], [], []
+        return np.array(starts), np.array(ends), np.array([label_dict[c] for c in labels])
+
+    def get_speaker_dict(self, speakers):
+        speaker_dict = {'UNK': 0, '[SPL]': 1}
+        for s in speakers:
+            if s not in speaker_dict and len(speaker_dict) < self.config['max_num_speakers']:
+                speaker_dict[s] = len(speaker_dict)
+        return speaker_dict
+
+    def tensorize_example(self, example, is_training, trigger_token_ids=None):
+        clusters = example["clusters"]
+
+        gold_mentions = sorted(tuple(m) for m in util.flatten(clusters))
+        gold_mention_map = {m: i for i, m in enumerate(gold_mentions)}
+        cluster_ids = np.zeros(len(gold_mentions))
+        for cluster_id, cluster in enumerate(clusters):
+            for mention in cluster:
+                cluster_ids[gold_mention_map[tuple(mention)]] = cluster_id + 1
+
+        sentences = example["sentences"]
+        num_words = sum(len(s) for s in sentences)
+        speakers = example["speakers"]
+        # assert num_words == len(speakers), (num_words, len(speakers))
+        speaker_dict = self.get_speaker_dict(util.flatten(speakers))
+        sentence_map = example['sentence_map']
+
+        max_sentence_length = self.max_segment_len
+        text_len = np.array([len(s) for s in sentences])
+
+        input_ids, input_mask, speaker_ids = [], [], []
+        for i, (sentence, speaker) in enumerate(zip(sentences, speakers)):
+            sent_input_ids = self.tokenizer.convert_tokens_to_ids(sentence)
+            sent_input_mask = [1] * len(sent_input_ids)
+            sent_speaker_ids = [speaker_dict.get(s, 3) for s in speaker]
+            while len(sent_input_ids) < max_sentence_length:
+                sent_input_ids.append(0)
+                sent_input_mask.append(0)
+                sent_speaker_ids.append(0)
+            input_ids.append(sent_input_ids)
+            speaker_ids.append(sent_speaker_ids)
+            input_mask.append(sent_input_mask)
+        input_ids = np.array(input_ids)
+        input_mask = np.array(input_mask)
+        speaker_ids = np.array(speaker_ids)
+        assert num_words == np.sum(input_mask), (num_words, np.sum(input_mask))
+
+        doc_key = example["doc_key"]
+        self.subtoken_maps[doc_key] = example.get("subtoken_map", None)
+        self.gold[doc_key] = example["clusters"]
+        genre = self.genres.get(doc_key[:2], 0)
+
+        gold_starts, gold_ends = self.tensorize_mentions(gold_mentions)
+        example_tensors = (input_ids, input_mask,  text_len, speaker_ids, genre, is_training,
+                           gold_starts, gold_ends, cluster_ids, sentence_map, input_ids[:, 1:1+int(self.config["num_triggers"])])
+
+        if is_training and len(sentences) > self.config["max_training_sentences"]:
+            if self.config['single_example']:
+                return self.truncate_example(*example_tensors)
+            else:
+                offsets = range(self.config['max_training_sentences'], len(
+                    sentences), self.config['max_training_sentences'])
+                tensor_list = [self.truncate_example(
+                    *(example_tensors + (offset,))) for offset in offsets]
+                return tensor_list
+        else:
+            return example_tensors
+
+    def truncate_example(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, sentence_offset=None):
+        max_training_sentences = self.config["max_training_sentences"]
+        num_sentences = input_ids.shape[0]
+        assert num_sentences > max_training_sentences
+
+        sentence_offset = random.randint(
+            0, num_sentences - max_training_sentences) if sentence_offset is None else sentence_offset
+        word_offset = text_len[:sentence_offset].sum()
+        num_words = text_len[sentence_offset:sentence_offset +
+                             max_training_sentences].sum()
+        input_ids = input_ids[sentence_offset:sentence_offset +
+                              max_training_sentences, :]
+        input_mask = input_mask[sentence_offset:sentence_offset +
+                                max_training_sentences, :]
+        speaker_ids = speaker_ids[sentence_offset:sentence_offset +
+                                  max_training_sentences, :]
+        text_len = text_len[sentence_offset:sentence_offset +
+                            max_training_sentences]
+
+        sentence_map = sentence_map[word_offset: word_offset + num_words]
+        gold_spans = np.logical_and(
+            gold_ends >= word_offset, gold_starts < word_offset + num_words)
+        gold_starts = gold_starts[gold_spans] - word_offset
+        gold_ends = gold_ends[gold_spans] - word_offset
+        cluster_ids = cluster_ids[gold_spans]
+
+        return input_ids, input_mask, text_len, speaker_ids, genre, is_training,  gold_starts, gold_ends, cluster_ids, sentence_map
+
+    def get_candidate_labels(self, candidate_starts, candidate_ends, labeled_starts, labeled_ends, labels):
+        same_start = tf.equal(tf.expand_dims(labeled_starts, 1), tf.expand_dims(
+            candidate_starts, 0))  # [num_labeled, num_candidates]
+        same_end = tf.equal(tf.expand_dims(labeled_ends, 1), tf.expand_dims(
+            candidate_ends, 0))  # [num_labeled, num_candidates]
+        # [num_labeled, num_candidates]
+        same_span = tf.logical_and(same_start, same_end)
+        candidate_labels = tf.matmul(tf.expand_dims(
+            labels, 0), tf.to_int32(same_span))  # [1, num_candidates]
+        candidate_labels = tf.squeeze(candidate_labels, 0)  # [num_candidates]
+        return candidate_labels
+
+    def get_dropout(self, dropout_rate, is_training):
+        return 1 - (tf.to_float(is_training) * dropout_rate)
+
+    def coarse_to_fine_pruning(self, top_span_emb, top_span_mention_scores, c):
+        k = util.shape(top_span_emb, 0)
+        top_span_range = tf.range(k)  # [k]
+        antecedent_offsets = tf.expand_dims(
+            top_span_range, 1) - tf.expand_dims(top_span_range, 0)  # [k, k]
+        antecedents_mask = antecedent_offsets >= 1  # [k, k]
+        fast_antecedent_scores = tf.expand_dims(
+            top_span_mention_scores, 1) + tf.expand_dims(top_span_mention_scores, 0)  # [k, k]
+        # [k, k]
+        fast_antecedent_scores += tf.log(tf.to_float(antecedents_mask))
+        # [k, k]
+        fast_antecedent_scores += self.get_fast_antecedent_scores(top_span_emb)
+        if self.config['use_prior']:
+            antecedent_distance_buckets = self.bucket_distance(
+                antecedent_offsets)  # [k, c]
+            distance_scores = util.projection(tf.nn.dropout(tf.get_variable("antecedent_distance_emb", [10, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(
+                stddev=0.02)), self.dropout), 1, initializer=tf.truncated_normal_initializer(stddev=0.02))  # [10, 1]
+            antecedent_distance_scores = tf.gather(tf.squeeze(
+                distance_scores, 1), antecedent_distance_buckets)  # [k, c]
+            fast_antecedent_scores += antecedent_distance_scores
+
+        _, top_antecedents = tf.nn.top_k(
+            fast_antecedent_scores, c, sorted=False)  # [k, c]
+        top_antecedents_mask = util.batch_gather(
+            antecedents_mask, top_antecedents)  # [k, c]
+        top_fast_antecedent_scores = util.batch_gather(
+            fast_antecedent_scores, top_antecedents)  # [k, c]
+        top_antecedent_offsets = util.batch_gather(
+            antecedent_offsets, top_antecedents)  # [k, c]
+        return top_antecedents, top_antecedents_mask, top_fast_antecedent_scores, top_antecedent_offsets
+
+    def get_predictions_and_loss(self, input_ids, input_mask, text_len, speaker_ids, genre, is_training, gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids):
+
+        model = modeling.BertModel(
+            config=self.bert_config,
+            is_training=is_training,
+            input_ids=input_ids,
+            input_mask=input_mask,
+            use_one_hot_embeddings=False,
+            scope='bert')
+
+        params = [input_ids, input_mask, text_len, speaker_ids, genre, is_training,
+                  gold_starts, gold_ends, cluster_ids, sentence_map, trigger_ids]
+
+        all_encoder_layers = model.get_all_encoder_layers()
+        mention_doc = model.get_sequence_output()
+        word_embeddings = model.get_embedding_table()
+
+        self.dropout = self.get_dropout(
+            self.config["dropout_rate"], is_training)
+
+        num_sentences = tf.shape(mention_doc)[0]
+        max_sentence_length = tf.shape(mention_doc)[1]
+        mention_doc = self.flatten_emb_by_sentence(mention_doc, input_mask)
+        num_words = util.shape(mention_doc, 0)
+        antecedent_doc = mention_doc
+
+        flattened_sentence_indices = sentence_map
+        candidate_starts = tf.tile(tf.expand_dims(tf.range(num_words), 1), [
+                                   1, self.max_span_width])  # [num_words, max_span_width]
+        candidate_ends = candidate_starts + \
+            tf.expand_dims(tf.range(self.max_span_width),
+                           0)  # [num_words, max_span_width]
+        candidate_start_sentence_indices = tf.gather(
+            flattened_sentence_indices, candidate_starts)  # [num_words, max_span_width]
+        candidate_end_sentence_indices = tf.gather(flattened_sentence_indices, tf.minimum(
+            candidate_ends, num_words - 1))  # [num_words, max_span_width]
+        candidate_mask = tf.logical_and(candidate_ends < num_words, tf.equal(
+            candidate_start_sentence_indices, candidate_end_sentence_indices))  # [num_words, max_span_width]
+        flattened_candidate_mask = tf.reshape(
+            candidate_mask, [-1])  # [num_words * max_span_width]
+        candidate_starts = tf.boolean_mask(tf.reshape(
+            candidate_starts, [-1]), flattened_candidate_mask)  # [num_candidates]
+        candidate_ends = tf.boolean_mask(tf.reshape(
+            candidate_ends, [-1]), flattened_candidate_mask)  # [num_candidates]
+        candidate_sentence_indices = tf.boolean_mask(tf.reshape(
+            candidate_start_sentence_indices, [-1]), flattened_candidate_mask)  # [num_candidates]
+
+        candidate_cluster_ids = self.get_candidate_labels(
+            candidate_starts, candidate_ends, gold_starts, gold_ends, cluster_ids)  # [num_candidates]
+
+        candidate_span_emb = self.get_span_emb(
+            mention_doc, mention_doc, candidate_starts, candidate_ends)  # [num_candidates, emb]
+        candidate_mention_scores = self.get_mention_scores(
+            candidate_span_emb, candidate_starts, candidate_ends)
+        candidate_mention_scores = tf.squeeze(
+            candidate_mention_scores, 1)  # [k]
+
+        # beam size
+        k = tf.minimum(3900, tf.to_int32(
+            tf.floor(tf.to_float(num_words) * self.config["top_span_ratio"])))
+        c = tf.minimum(self.config["max_top_antecedents"], k)
+        # pull from beam
+        top_span_indices = coref_ops.extract_spans(tf.expand_dims(candidate_mention_scores, 0),
+                                                   tf.expand_dims(
+                                                       candidate_starts, 0),
+                                                   tf.expand_dims(
+                                                       candidate_ends, 0),
+                                                   tf.expand_dims(k, 0),
+                                                   num_words,
+                                                   True)  # [1, k]
+        top_span_indices.set_shape([1, None])
+        top_span_indices = tf.squeeze(top_span_indices, 0)  # [k]
+
+        top_span_starts = tf.gather(
+            candidate_starts, top_span_indices)  # [k]u8
+        top_span_ends = tf.gather(candidate_ends, top_span_indices)  # [k]
+        top_span_emb = tf.gather(
+            candidate_span_emb, top_span_indices)  # [k, emb]
+        top_span_cluster_ids = tf.gather(
+            candidate_cluster_ids, top_span_indices)  # [k]
+        top_span_mention_scores = tf.gather(
+            candidate_mention_scores, top_span_indices)  # [k]
+        genre_emb = tf.gather(tf.get_variable("genre_embeddings", [len(
+            self.genres), self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), genre)  # [emb]
+        if self.config['use_metadata']:
+            speaker_ids = self.flatten_emb_by_sentence(speaker_ids, input_mask)
+            top_span_speaker_ids = tf.gather(
+                speaker_ids, top_span_starts)  # [k]i
+        else:
+            top_span_speaker_ids = None
+
+        dummy_scores = tf.zeros([k, 1])  # [k, 1]
+        top_antecedents, top_antecedents_mask, top_fast_antecedent_scores, top_antecedent_offsets = self.coarse_to_fine_pruning(
+            top_span_emb, top_span_mention_scores, c)
+        num_segs, seg_len = util.shape(input_ids, 0), util.shape(input_ids, 1)
+        word_segments = tf.tile(tf.expand_dims(
+            tf.range(0, num_segs), 1), [1, seg_len])
+        flat_word_segments = tf.boolean_mask(tf.reshape(
+            word_segments, [-1]), tf.reshape(input_mask, [-1]))
+        mention_segments = tf.expand_dims(
+            tf.gather(flat_word_segments, top_span_starts), 1)  # [k, 1]
+        antecedent_segments = tf.gather(flat_word_segments, tf.gather(
+            top_span_starts, top_antecedents))  # [k, c]
+        segment_distance = tf.clip_by_value(mention_segments - antecedent_segments, 0,
+                                            self.config['max_training_sentences'] - 1) if self.config['use_segment_distance'] else None  # [k, c]
+        if self.config['fine_grained']:
+            for i in range(self.config["coref_depth"]):
+                with tf.variable_scope("coref_layer", reuse=(i > 0)):
+                    top_antecedent_emb = tf.gather(
+                        top_span_emb, top_antecedents)  # [k, c, emb]
+                    top_antecedent_scores = top_fast_antecedent_scores + self.get_slow_antecedent_scores(
+                        top_span_emb, top_antecedents, top_antecedent_emb, top_antecedent_offsets, top_span_speaker_ids, genre_emb, segment_distance)  # [k, c]
+                    top_antecedent_weights = tf.nn.softmax(
+                        tf.concat([dummy_scores, top_antecedent_scores], 1))  # [k, c + 1]
+                    top_antecedent_emb = tf.concat(
+                        [tf.expand_dims(top_span_emb, 1), top_antecedent_emb], 1)  # [k, c + 1, emb]
+                    attended_span_emb = tf.reduce_sum(tf.expand_dims(
+                        top_antecedent_weights, 2) * top_antecedent_emb, 1)  # [k, emb]
+                    with tf.variable_scope("f"):
+                        f = tf.sigmoid(util.projection(tf.concat(
+                            [top_span_emb, attended_span_emb], 1), util.shape(top_span_emb, -1)))  # [k, emb]
+                        top_span_emb = f * attended_span_emb + \
+                            (1 - f) * top_span_emb  # [k, emb]
+
+        else:
+            top_antecedent_scores = top_fast_antecedent_scores
+
+        top_antecedent_scores = tf.concat(
+            [dummy_scores, top_antecedent_scores], 1)  # [k, c + 1]
+
+        top_antecedent_cluster_ids = tf.gather(
+            top_span_cluster_ids, top_antecedents)  # [k, c]
+        # [k, c]
+        top_antecedent_cluster_ids += tf.to_int32(
+            tf.log(tf.to_float(top_antecedents_mask)))
+        same_cluster_indicator = tf.equal(
+            top_antecedent_cluster_ids, tf.expand_dims(top_span_cluster_ids, 1))  # [k, c]
+        non_dummy_indicator = tf.expand_dims(
+            top_span_cluster_ids > 0, 1)  # [k, 1]
+        pairwise_labels = tf.logical_and(
+            same_cluster_indicator, non_dummy_indicator)  # [k, c]
+        dummy_labels = tf.logical_not(tf.reduce_any(
+            pairwise_labels, 1, keepdims=True))  # [k, 1]
+        top_antecedent_labels = tf.concat(
+            [dummy_labels, pairwise_labels], 1)  # [k, c + 1]
+        loss = self.softmax_loss(
+            top_antecedent_scores, top_antecedent_labels)  # [k]
+        loss = tf.reduce_sum(loss)  # []
+
+        return [candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends, top_antecedents, top_antecedent_scores], loss, \
+            word_embeddings, params
+
+    def get_span_emb(self, head_emb, context_outputs, span_starts, span_ends):
+        span_emb_list = []
+
+        span_start_emb = tf.gather(context_outputs, span_starts)  # [k, emb]
+        span_emb_list.append(span_start_emb)
+
+        span_end_emb = tf.gather(context_outputs, span_ends)  # [k, emb]
+        span_emb_list.append(span_end_emb)
+
+        span_width = 1 + span_ends - span_starts  # [k]
+
+        if self.config["use_features"]:
+            span_width_index = span_width - 1  # [k]
+            span_width_emb = tf.gather(tf.get_variable("span_width_embeddings", [
+                                       self.config["max_span_width"], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), span_width_index)  # [k, emb]
+            span_width_emb = tf.nn.dropout(span_width_emb, self.dropout)
+            span_emb_list.append(span_width_emb)
+
+        if self.config["model_heads"]:
+            mention_word_scores = self.get_masked_mention_word_scores(
+                context_outputs, span_starts, span_ends)
+            head_attn_reps = tf.matmul(
+                mention_word_scores, context_outputs)  # [K, T]
+            span_emb_list.append(head_attn_reps)
+
+        span_emb = tf.concat(span_emb_list, 1)  # [k, emb]
+        return span_emb  # [k, emb]
+
+    def get_mention_scores(self, span_emb, span_starts, span_ends):
+        with tf.variable_scope("mention_scores"):
+            span_scores = util.ffnn(
+                span_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout)  # [k, 1]
+        if self.config['use_prior']:
+            span_width_emb = tf.get_variable("span_width_prior_embeddings", [
+                                             self.config["max_span_width"], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02))  # [W, emb]
+            span_width_index = span_ends - span_starts  # [NC]
+            with tf.variable_scope("width_scores"):
+                width_scores = util.ffnn(
+                    span_width_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout)  # [W, 1]
+            width_scores = tf.gather(width_scores, span_width_index)
+            span_scores += width_scores
+        return span_scores
+
+    def get_width_scores(self, doc, starts, ends):
+        distance = ends - starts
+        span_start_emb = tf.gather(doc, starts)
+        hidden = util.shape(doc, 1)
+        with tf.variable_scope('span_width'):
+            span_width_emb = tf.gather(tf.get_variable("start_width_embeddings", [
+                                       self.config["max_span_width"], hidden], initializer=tf.truncated_normal_initializer(stddev=0.02)), distance)  # [W, emb]
+        scores = tf.reduce_sum(span_start_emb * span_width_emb, axis=1)
+        return scores
+
+    def get_masked_mention_word_scores(self, encoded_doc, span_starts, span_ends):
+        num_words = util.shape(encoded_doc, 0)  # T
+        num_c = util.shape(span_starts, 0)  # NC
+        doc_range = tf.tile(tf.expand_dims(
+            tf.range(0, num_words), 0), [num_c, 1])  # [K, T]
+        mention_mask = tf.logical_and(doc_range >= tf.expand_dims(
+            span_starts, 1), doc_range <= tf.expand_dims(span_ends, 1))  # [K, T]
+        with tf.variable_scope("mention_word_attn"):
+            word_attn = tf.squeeze(util.projection(
+                encoded_doc, 1, initializer=tf.truncated_normal_initializer(stddev=0.02)), 1)
+        mention_word_attn = tf.nn.softmax(
+            tf.log(tf.to_float(mention_mask)) + tf.expand_dims(word_attn, 0))
+        return mention_word_attn
+
+    def softmax_loss(self, antecedent_scores, antecedent_labels):
+        gold_scores = antecedent_scores + \
+            tf.log(tf.to_float(antecedent_labels))  # [k, max_ant + 1]
+        marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])  # [k]
+        log_norm = tf.reduce_logsumexp(antecedent_scores, [1])  # [k]
+        return log_norm - marginalized_gold_scores  # [k]
+
+    def bucket_distance(self, distances):
+        """
+        Places the given values (designed for distances) into 10 semi-logscale buckets:
+        [0, 1, 2, 3, 4, 5-7, 8-15, 16-31, 32-63, 64+].
+        """
+        logspace_idx = tf.to_int32(
+            tf.floor(tf.log(tf.to_float(distances))/math.log(2))) + 3
+        use_identity = tf.to_int32(distances <= 4)
+        combined_idx = use_identity * distances + \
+            (1 - use_identity) * logspace_idx
+        return tf.clip_by_value(combined_idx, 0, 9)
+
+    def get_slow_antecedent_scores(self, top_span_emb, top_antecedents, top_antecedent_emb, top_antecedent_offsets, top_span_speaker_ids, genre_emb, segment_distance=None):
+        k = util.shape(top_span_emb, 0)
+        c = util.shape(top_antecedents, 1)
+
+        feature_emb_list = []
+
+        if self.config["use_metadata"]:
+            top_antecedent_speaker_ids = tf.gather(
+                top_span_speaker_ids, top_antecedents)  # [k, c]
+            same_speaker = tf.equal(tf.expand_dims(
+                top_span_speaker_ids, 1), top_antecedent_speaker_ids)  # [k, c]
+            speaker_pair_emb = tf.gather(tf.get_variable("same_speaker_emb", [
+                                         2, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), tf.to_int32(same_speaker))  # [k, c, emb]
+            feature_emb_list.append(speaker_pair_emb)
+
+            tiled_genre_emb = tf.tile(tf.expand_dims(
+                tf.expand_dims(genre_emb, 0), 0), [k, c, 1])  # [k, c, emb]
+            feature_emb_list.append(tiled_genre_emb)
+
+        if self.config["use_features"]:
+            antecedent_distance_buckets = self.bucket_distance(
+                top_antecedent_offsets)  # [k, c]
+            antecedent_distance_emb = tf.gather(tf.get_variable("antecedent_distance_emb", [
+                                                10, self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), antecedent_distance_buckets)  # [k, c]
+            feature_emb_list.append(antecedent_distance_emb)
+        if segment_distance is not None:
+            with tf.variable_scope('segment_distance', reuse=tf.AUTO_REUSE):
+                segment_distance_emb = tf.gather(tf.get_variable("segment_distance_embeddings", [
+                                                 self.config['max_training_sentences'], self.config["feature_size"]], initializer=tf.truncated_normal_initializer(stddev=0.02)), segment_distance)  # [k, emb]
+            feature_emb_list.append(segment_distance_emb)
+
+        feature_emb = tf.concat(feature_emb_list, 2)  # [k, c, emb]
+        feature_emb = tf.nn.dropout(feature_emb, self.dropout)  # [k, c, emb]
+
+        target_emb = tf.expand_dims(top_span_emb, 1)  # [k, 1, emb]
+        similarity_emb = top_antecedent_emb * target_emb  # [k, c, emb]
+        target_emb = tf.tile(target_emb, [1, c, 1])  # [k, c, emb]
+
+        pair_emb = tf.concat(
+            [target_emb, top_antecedent_emb, similarity_emb, feature_emb], 2)  # [k, c, emb]
+
+        with tf.variable_scope("slow_antecedent_scores"):
+            slow_antecedent_scores = util.ffnn(
+                pair_emb, self.config["ffnn_depth"], self.config["ffnn_size"], 1, self.dropout)  # [k, c, 1]
+        slow_antecedent_scores = tf.squeeze(
+            slow_antecedent_scores, 2)  # [k, c]
+        return slow_antecedent_scores  # [k, c]
+
+    def get_fast_antecedent_scores(self, top_span_emb):
+        with tf.variable_scope("src_projection"):
+            source_top_span_emb = tf.nn.dropout(util.projection(
+                top_span_emb, util.shape(top_span_emb, -1)), self.dropout)  # [k, emb]
+        target_top_span_emb = tf.nn.dropout(
+            top_span_emb, self.dropout)  # [k, emb]
+        # [k, k]
+        return tf.matmul(source_top_span_emb, target_top_span_emb, transpose_b=True)
+
+    def flatten_emb_by_sentence(self, emb, text_len_mask):
+        num_sentences = tf.shape(emb)[0]
+        max_sentence_length = tf.shape(emb)[1]
+
+        emb_rank = len(emb.get_shape())
+        if emb_rank == 2:
+            flattened_emb = tf.reshape(
+                emb, [num_sentences * max_sentence_length])
+        elif emb_rank == 3:
+            flattened_emb = tf.reshape(
+                emb, [num_sentences * max_sentence_length, util.shape(emb, 2)])
+        else:
+            raise ValueError("Unsupported rank: {}".format(emb_rank))
+        return tf.boolean_mask(flattened_emb, tf.reshape(text_len_mask, [num_sentences * max_sentence_length]))
+
+    def get_predicted_antecedents(self, antecedents, antecedent_scores):
+        predicted_antecedents = []
+        for i, index in enumerate(np.argmax(antecedent_scores, axis=1) - 1):
+            if index < 0:
+                predicted_antecedents.append(-1)
+            else:
+                predicted_antecedents.append(antecedents[i, index])
+        return predicted_antecedents
+
+    def get_predicted_clusters(self, top_span_starts, top_span_ends, predicted_antecedents):
+        mention_to_predicted = {}
+        predicted_clusters = []
+        for i, predicted_index in enumerate(predicted_antecedents):
+            if predicted_index < 0:
+                continue
+            assert i > predicted_index, (i, predicted_index)
+            predicted_antecedent = (int(top_span_starts[predicted_index]), int(
+                top_span_ends[predicted_index]))
+            if predicted_antecedent in mention_to_predicted:
+                predicted_cluster = mention_to_predicted[predicted_antecedent]
+            else:
+                predicted_cluster = len(predicted_clusters)
+                predicted_clusters.append([predicted_antecedent])
+                mention_to_predicted[predicted_antecedent] = predicted_cluster
+
+            mention = (int(top_span_starts[i]), int(top_span_ends[i]))
+            predicted_clusters[predicted_cluster].append(mention)
+            mention_to_predicted[mention] = predicted_cluster
+
+        predicted_clusters = [tuple(pc) for pc in predicted_clusters]
+        mention_to_predicted = {
+            m: predicted_clusters[i] for m, i in mention_to_predicted.items()}
+
+        return predicted_clusters, mention_to_predicted
+
+    def evaluate_coref(self, top_span_starts, top_span_ends, predicted_antecedents, gold_clusters, evaluator):
+        gold_clusters = [tuple(tuple(m) for m in gc) for gc in gold_clusters]
+        mention_to_gold = {}
+        for gc in gold_clusters:
+            for mention in gc:
+                mention_to_gold[mention] = gc
+
+        predicted_clusters, mention_to_predicted = self.get_predicted_clusters(
+            top_span_starts, top_span_ends, predicted_antecedents)
+        evaluator.update(predicted_clusters, gold_clusters,
+                         mention_to_predicted, mention_to_gold)
+        return predicted_clusters
+
+    def load_eval_data(self, trigger_token_ids):
+        tokens = [self.vocab[x] for x in trigger_token_ids[0]]
+        print("---For evaluating, the trigger tokens are:",
+              trigger_token_ids, tokens)
+        if self.eval_data is None:
+            def load_line(line):
+                example = json.loads(line)
+                # example = line
+                return self.tensorize_example(example, is_training=False), example
+            with open(self.config["eval_path"]) as f:
+                self.eval_data = [load_line(l) for l in f.readlines()]
+            # labels = collections.defaultdict(set)
+            # stats = collections.defaultdict(int)
+            # documents = minimize.minimize_language("dev_type1_anti_stereotype", "english", "v4_auto_conll", \
+            #   labels = labels,\
+            #     stats = stats, \
+            #   vocab_file='cased_config_vocab/vocab.txt', seg_len = 384, input_dir='./data', \
+            #     output_dir="./data", do_lower_case=False, triggers=tokens)
+            # self.eval_data = [load_line(l) for l in documents]
+
+        print("updating new triggers to eval dataset")
+        for tensorized_example, example in self.eval_data:
+            inputids = tensorized_example[0][0]
+            inputids[1: 1+int(self.config["num_triggers"])] = trigger_token_ids[0]
+            tensorized_example[0][0] = inputids
+            inputsen = example["sentences"][0]
+            inputsen[1:1+int(self.config["num_triggers"])] = tokens
+            example["sentences"] = [inputsen]
+
+        num_words = sum(tensorized_example[2].sum()
+                        for tensorized_example, _ in self.eval_data)
+        # print("eval data instances:", self.eval_data[0])
+        print("Loaded {} eval examples.".format(len(self.eval_data)))
+
+    def evaluate(self, session, global_step=None, official_stdout=False, keys=None, eval_mode=False, trigger_token_ids=None):
+        self.load_eval_data(trigger_token_ids)
+
+        coref_predictions = {}
+        coref_evaluator = metrics.CorefEvaluator()
+        losses = []
+        doc_keys = []
+        num_evaluated = 0
+
+        for example_num, (tensorized_example, example) in enumerate(self.eval_data):
+            _, _, _, _, _, _, gold_starts, gold_ends, _, _, _ = tensorized_example
+            feed_dict = {i: t for i, t in zip(
+                self.input_tensors, tensorized_example)}
+            # if tensorized_example[0].shape[0] <= 9:
+            if keys is not None and example['doc_key'] not in keys:
+                # print('Skipping...', example['doc_key'], tensorized_example[0].shape)
+                continue
+            doc_keys.append(example['doc_key'])
+            loss, (candidate_starts, candidate_ends, candidate_mention_scores, top_span_starts, top_span_ends,
+                   top_antecedents, top_antecedent_scores) = session.run([self.loss, self.predictions], feed_dict=feed_dict)
+            # losses.append(session.run(self.loss, feed_dict=feed_dict))
+            losses.append(loss)
+            predicted_antecedents = self.get_predicted_antecedents(
+                top_antecedents, top_antecedent_scores)
+            coref_predictions[example["doc_key"]] = self.evaluate_coref(
+                top_span_starts, top_span_ends, predicted_antecedents, example["clusters"], coref_evaluator)
+            if example_num % 10 == 0:
+                print("Evaluated {}/{} examples.".format(example_num +
+                                                         1, len(self.eval_data)))
+
+        summary_dict = {}
+        if eval_mode:
+            conll_results = conll.evaluate_conll(
+                self.config["conll_eval_path"], coref_predictions, self.subtoken_maps, official_stdout)
+            average_f1 = sum(
+                results["f"] for results in conll_results.values()) / len(conll_results)
+            summary_dict["Average F1 (conll)"] = average_f1
+            print("Average F1 (conll): {:.2f}%".format(average_f1))
+
+        p, r, f = coref_evaluator.get_prf()
+        summary_dict["Average F1 (py)"] = f
+        print("Average F1 (py): {:.2f}% on {} docs".format(
+            f * 100, len(doc_keys)))
+        summary_dict["Average precision (py)"] = p
+        print("Average precision (py): {:.2f}%".format(p * 100))
+        summary_dict["Average recall (py)"] = r
+        print("Average recall (py): {:.2f}%".format(r * 100))
+
+        return util.make_summary(summary_dict), f
+
+    def hotflip_attack(self, averaged_grad, embedding_matrix, trigger_token_ids,
+                       increase_loss=False, num_candidates=1):
+        """
+        The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
+        the nice code of Paul Michel here https://github.com/pmichel31415/translate/blob/paul/
+        pytorch_translate/research/adversarial/adversaries/brute_force_adversary.py
+
+        This function takes in the model's average_grad over a batch of examples, the model's
+        token embedding matrix, and the current trigger token IDs. It returns the top token
+        candidates for each position.
+
+        If increase_loss=True, then the attack reverses the sign of the gradient and tries to increase
+        the loss (decrease the model's probability of the true class). For targeted attacks, you want
+        to decrease the loss of the target class (increase_loss=False).
+        """
+
+        averaged_grad = tf.expand_dims(averaged_grad, 0)
+        gradient_dot_embedding_matrix = tf.einsum(
+            "bij,kj->bik", averaged_grad, embedding_matrix)
+        if not increase_loss:
+            # lower versus increase the class probability.
+            gradient_dot_embedding_matrix *= -1
+        if num_candidates > 1:  # get top k options
+            _, best_k_ids = tf.math.top_k(
+                gradient_dot_embedding_matrix, num_candidates)
+            return best_k_ids[0]
+        _, best_at_each_step = gradient_dot_embedding_matrix.max(2)
+        return best_at_each_step[0]
+
+    def get_best_candidates(self, session, input_tensors, trigger_token_ids, cand_trigger_token_ids, beam_size=1):
+        """"
+        Given the list of candidate trigger token ids (of number of trigger words by number of candidates
+        per word), it finds the best new candidate trigger.
+        This performs beam search in a left to right fashion.
+        """
+        # first round, no beams, just get the loss for each of the candidates in index 0.
+        # (indices 1-end are just the old trigger)
+
+        loss_per_candidate = self.get_loss_per_candidate(session, 0,  input_tensors, trigger_token_ids,
+                                                         cand_trigger_token_ids)
+
+        # minimize the loss
+        top_candidates = heapq.nsmallest(
+            beam_size, loss_per_candidate, key=itemgetter(1))
+        # print("0 top_candiates:", top_candidates)
+
+        # top_candidates now contains beam_size trigger sequences, each with a different 0th token
+        # for all trigger tokens, skipping the 0th (we did it above)
+        for idx in range(1, len(trigger_token_ids[0])):
+            loss_per_candidate = []
+            input_tensors[-1] = top_candidates[0][0]
+            input_tensors[0][0][1:1+int(self.config["num_triggers"])] = top_candidates[0][0]
+            for cand, _ in top_candidates:  # for all the beams, try all the candidates at idx
+                loss_per_candidate.extend(self.get_loss_per_candidate(session, idx, input_tensors, cand,
+                                                                      cand_trigger_token_ids))
+            top_candidates = heapq.nsmallest(
+                beam_size, loss_per_candidate, key=itemgetter(1))
+            # print(f"{idx}: top_candiates: {top_candidates}")
+        return tf.convert_to_tensor(min(top_candidates, key=itemgetter(1))[0])
+
+    def get_loss_per_candidate(self, session, index, input_tensors, trigger_token_ids, cand_trigger_token_ids):
+        """
+        For a particular index, the function tries all of the candidate tokens for that index.
+        The function returns a list containing the candidate triggers it tried, along with their loss.
+        """
+        if isinstance(cand_trigger_token_ids[0], (np.int64, int)):
+            print("Only 1 candidate for index detected, not searching")
+            return trigger_token_ids
+        loss_per_candidate = []
+
+        # print("inside input tensors:", input_tensors)
+        # loss for the trigger without trying the candidates
+        feed_dict = {i: t for i, t in zip(self.input_tensors, input_tensors)}
+        curr_loss = session.run([self.loss], feed_dict=feed_dict)
+        loss_per_candidate.append((deepcopy(trigger_token_ids), curr_loss))
+        for cand_id in range(len(cand_trigger_token_ids[0])):
+            trigger_token_ids_one_replaced = deepcopy(
+                np.array(trigger_token_ids))  # copy trigger
+            # replace one token
+            trigger_token_ids_one_replaced[0][index] = cand_trigger_token_ids[index][cand_id]
+
+            # deepcopy problem
+            input_tensors[0][0][1 +
+                                index] = cand_trigger_token_ids[index][cand_id]
+            # print("replaced input_tensors:", input_tensors)
+
+            feed_dict = {i: t for i, t in zip(
+                self.input_tensors, input_tensors)}
+            loss = session.run([self.loss], feed_dict=feed_dict)
+            loss_per_candidate.append(
+                (deepcopy(trigger_token_ids_one_replaced), loss))
+        return loss_per_candidate

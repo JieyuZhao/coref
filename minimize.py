@@ -190,8 +190,11 @@ def skip(doc_key):
   return False
 
 def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir):
-  input_path = "{}/{}.{}.{}_triggers".format(input_dir, name, language, extension)
-  output_path = "{}/{}.{}.{}_triggers.jsonlines".format(output_dir, name, language, seg_len)
+  input_path = "{}/{}.{}.{}_{}triggers".format(input_dir, name, language, extension, sys.argv[5])
+  output_path = "{}/{}.{}.{}_{}triggers.jsonlines".format(output_dir, name, language, seg_len, sys.argv[5])
+  if 'stereotype' in name:
+    input_path ="{}/{}.{}_{}triggers".format(input_dir, name, extension, sys.argv[5])
+    output_path = "{}/{}.{}_{}triggers.jsonlines".format(output_dir, name,  seg_len, sys.argv[5]) 
   count = 0
   print("Minimizing {}".format(input_path))
   documents = []
@@ -218,8 +221,10 @@ def minimize_partition(name, language, extension, labels, stats, tokenizer, seg_
 
 def minimize_conll_jy(name, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, trigger_tokens=None):
   input_path = "{}/{}.{}.{}".format(input_dir, name, language, extension)
+  if 'stereotype' in name:
+    input_path ="{}/{}.{}".format(input_dir, name,  extension)
   # output_path = "{}/{}.{}_triggers.jsonlines".format(output_dir, name, seg_len)
-  output_path = input_path + "_triggers"
+  output_path = input_path + "_"+ str(len(trigger_tokens))+"triggers"
   count = 0
   print("adding triggered lines to {}".format(input_path))
   documents = []
@@ -252,15 +257,16 @@ def minimize_language(filename,language, extension, labels, stats, vocab_file, s
                 vocab_file=vocab_file, do_lower_case=do_lower_case)
   # minimize_partition("dev.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
   # minimize_partition("train.union", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
-  # minimize_conll_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
+  # minimize_partition("test", language, "v4_gold_conll", labels, stats, tokenizer, seg_len, input_dir, output_dir)
+  minimize_conll_jy(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir, triggers)
+  minimize_partition(filename, language, extension, labels, stats, tokenizer, seg_len, input_dir, output_dir)
 
 if __name__ == "__main__":
   vocab_file = sys.argv[1]
   input_dir = sys.argv[2]
   output_dir = sys.argv[3]
-  triggers = ["the", "the", "the"]
   do_lower_case = sys.argv[4].lower() == 'true'
+  triggers = ["the"]* int(sys.argv[5])
   print(do_lower_case)
   labels = collections.defaultdict(set)
   stats = collections.defaultdict(int)
