@@ -274,7 +274,9 @@ if __name__ == "__main__":
     os.mkdir(output_dir)
   # for seg_len in [128, 256, 384, 512]:
   for seg_len in [384]:
-    minimize_language("test", "english", "v4_gold_conll",  labels, stats, vocab_file, \
+    # minimize_language("test", "english", "v4_gold_conll",  labels, stats, vocab_file, \
+      # seg_len, input_dir, output_dir, do_lower_case, triggers)
+    minimize_language("test_type2_anti_stereotype", "english", "v4_auto_conll",  labels, stats, vocab_file, \
       seg_len, input_dir, output_dir, do_lower_case, triggers)
     # minimize_language("chinese", labels, stats, vocab_file, seg_len)
     # minimize_language("es", labels, stats, vocab_file, seg_len)

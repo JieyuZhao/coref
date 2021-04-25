@@ -23,6 +23,6 @@ if __name__ == "__main__":
   log_dir = config["log_dir"]
   with tf.Session() as session:
     model.restore(session)
-    trigger_ids = np.array([[int(x) for x in sys.argv[2].split(",")]]) #[ 1109 13307 12680]
+    trigger_ids = np.array([[int(x) for x in sys.argv[2:]]]) #[ 1109 13307 12680]
     # Make sure eval mode is True if you want official conll results
     model.evaluate(session, official_stdout=True, eval_mode=True, trigger_token_ids=trigger_ids)
